@@ -6,79 +6,136 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 	"io/ioutil"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
 )
 
 type PostgreSQLAdapter struct {
-	Hostname string
-	Username string
-	Password string
-	AdminUser string
+	Hostname      string
+	Username      string
+	Password      string
+	AdminUser     string
 	AdminPassword string
-	DatabaseName string
-	Schema string
-	WipeDatabase bool
-	WipeSchema bool
-	DatabaseInit string
-	SchemaInit string
+	DatabaseName  string
+	Schema        string
+	WipeDatabase  bool
+	WipeSchema    bool
+	DatabaseInit  string
+	SchemaInit    string
 }
 
 var once sync.Once
 var defaultAdapter = PostgreSQLAdapter{
-	Hostname: "localhost",
-	Username: "grumble",
-	AdminUser: "postgres",
-	Password: "secret",
+	Hostname:      "localhost",
+	Username:      "grumble",
+	AdminUser:     "postgres",
+	Password:      "secret",
 	AdminPassword: "evenmoresecret",
-	DatabaseName: "grumble",
-	Schema: "grumble",
-	WipeDatabase: false,
-	WipeSchema: false,
-	DatabaseInit: "",
-	SchemaInit: "",
+	DatabaseName:  "grumble",
+	Schema:        "grumble",
+	WipeDatabase:  false,
+	WipeSchema:    false,
+	DatabaseInit:  "",
+	SchemaInit:    "",
 }
 
 var adapter *PostgreSQLAdapter
 
 type SQLColumn struct {
-	Name string
-	SQLType string
-	Default string
-	Nullable bool
+	Name       string
+	SQLType    string
+	Default    string
+	Nullable   bool
 	PrimaryKey bool
-	Unique bool
-	Indexed bool
+	Unique     bool
+	Indexed    bool
 }
 
 type SQLIndex struct {
-	TableName string
-	Name string
-	Columns []string
-	Unique bool
+	Name       string
+	Columns    []string
+	PrimaryKey bool
+	Unique     bool
 }
 
 type SQLTable struct {
-	pg PostgreSQLAdapter
-	Schema string
-	TableName string
-	Columns []SQLColumn
-	Indexes []SQLIndex
+	pg            PostgreSQLAdapter
+	Schema        string
+	TableName     string
+	Columns       []SQLColumn
+	Indexes       []SQLIndex
 	columnsByName map[string]int
 	indexesByName map[string]int
 }
 
-type SQLArray struct {
-	Values []string
+type SQLTemplate struct {
+	Name     string
+	SQL      string
+	Template *template.Template
 }
 
-func (scanner *SQLArray) Scan(src interface{}) (err error) {
-	var s = src.(string)
-	scanner.Values = strings.Split(s, "|")
+func (tmpl SQLTemplate) tweak(txt string) string {
+	re := regexp.MustCompile("__(count|reset)(:[[:digit:]]+)?__")
+	ix := int64(1)
+	arg := int64(-1)
+	for m := re.FindStringSubmatchIndex(txt); m != nil; m = re.FindStringSubmatchIndex(txt) {
+		if m[4] >= 0 {
+			arg, _ = strconv.ParseInt(txt[m[4]+1:m[5]], 0, 0)
+		}
+		repl := ""
+		switch txt[m[2]:m[3]] {
+		case "reset":
+			if arg >= 0 {
+				ix = arg
+			}
+		case "count":
+			if arg >= 0 {
+				ix = arg
+			}
+			repl = fmt.Sprintf("$%d", ix)
+			ix += 1
+		default:
+			repl = ""
+		}
+		switch {
+		case m[0] == 0 && m[1] == len(txt):
+			txt = repl
+		case m[0] == 0:
+			txt = fmt.Sprintf("%s%s", repl, txt[m[1]:])
+		case m[1] == len(txt):
+			txt = fmt.Sprintf("%s%s", txt[:m[0]], repl)
+		default:
+			txt = fmt.Sprintf("%s%s%s", txt[:m[0]], repl, txt[m[1]:])
+		}
+	}
+	return txt
+}
+
+func (tmpl SQLTemplate) Process(data interface{}) (sql string, err error) {
+	if tmpl.Template == nil {
+		tmpl.Template = template.Must(template.New(tmpl.Name).Parse(tmpl.SQL))
+	}
+	var buf bytes.Buffer
+	if err = tmpl.Template.Execute(&buf, data); err != nil {
+		return
+	}
+	sql = tmpl.tweak(string(buf.Bytes()))
+	return
+}
+
+func (tmpl SQLTemplate) Exec(conn *sql.DB, data interface{}, values ...interface{}) (err error) {
+	s, err := tmpl.Process(data)
+	if err != nil {
+		return
+	}
+	_, err = conn.Exec(s, values...)
 	return
 }
 
@@ -222,7 +279,7 @@ func (pg PostgreSQLAdapter) resetDatabase(conn *sql.DB) (err error) {
 	return pg.resetSchema(dropSchema, conn)
 }
 
-func (pg PostgreSQLAdapter) resetSchema(dropSchema bool, conn *sql.DB) (err error){
+func (pg PostgreSQLAdapter) resetSchema(dropSchema bool, conn *sql.DB) (err error) {
 	err = nil
 	if pg.Schema != "" {
 		createSchema := false
@@ -340,7 +397,7 @@ func (table *SQLTable) syncIndexes(conn *sql.DB) (err error) {
          LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE i.relkind = 'i'::"char" AND n.nspname = $1
 )
-SELECT idx.indexname, string_agg(attr.attname, '|') as columns, bool_and(idx.isunique)
+SELECT idx.indexname, array_agg(attr.attname) as columns, bool_and(idx.isunique)
     FROM indexData idx, pg_attribute attr
     WHERE attr.attrelid = idx.tableoid AND attr.attnum = idx.indkey[idx.ix] AND idx.tablename = $2
     GROUP BY idx.tablename, idx.indexname`
@@ -351,19 +408,22 @@ SELECT idx.indexname, string_agg(attr.attname, '|') as columns, bool_and(idx.isu
 	} else {
 		for rows.Next() {
 			var indexName string
-			var columns SQLArray
+			var columns []string
 			var unique bool
-			if err = rows.Scan(&indexName, &columns, &unique); err != nil {
+			if err = rows.Scan(&indexName, pq.Array(&columns), &unique); err != nil {
 				return
 			}
-			if len(columns.Values) == 1 {
-				column := table.GetColumnByName(columns.Values[0])
-				column.Indexed = !(column.PrimaryKey || column.Unique)
+			if len(columns) == 1 {
+				column := table.GetColumnByName(columns[0])
+				if unique {
+					column.Unique = true
+				} else {
+					column.Indexed = true
+				}
 			} else {
 				var index SQLIndex
-				index.TableName = table.TableName
 				index.Name = indexName
-				index.Columns = columns.Values
+				index.Columns = columns
 				index.Unique = unique
 				table.Indexes = append(table.Indexes, index)
 				table.indexesByName[index.Name] = len(table.Indexes) - 1
@@ -374,7 +434,7 @@ SELECT idx.indexname, string_agg(attr.attname, '|') as columns, bool_and(idx.isu
 }
 
 func (table *SQLTable) syncConstraints(conn *sql.DB) (err error) {
-	s := `SELECT string_agg(cu.column_name, '|')::text, tc.constraint_name, max(tc.constraint_type) 
+	s := `SELECT array_agg(cu.column_name)::text, tc.constraint_name, max(tc.constraint_type) 
 				FROM information_schema.constraint_column_usage cu  
 				INNER JOIN information_schema.table_constraints tc USING (constraint_schema, constraint_name)
 				WHERE cu.table_schema = $1 AND cu.table_name = $2 GROUP BY tc.constraint_name`
@@ -384,18 +444,16 @@ func (table *SQLTable) syncConstraints(conn *sql.DB) (err error) {
 		return
 	} else {
 		type constraint struct {
-			name string
+			name    string
 			columns []string
-			typ string
+			typ     string
 		}
 		var constraints = make(map[string]*constraint)
 		for rows.Next() {
 			var constr constraint
-			var array SQLArray
-			if err = rows.Scan(&array, &constr.name, &constr.typ); err != nil {
+			if err = rows.Scan(pq.Array(&constr.columns), &constr.name, &constr.typ); err != nil {
 				return
 			}
-			constr.columns = array.Values
 			constraints[constr.name] = &constr
 		}
 		for _, constr := range constraints {
@@ -405,8 +463,24 @@ func (table *SQLTable) syncConstraints(conn *sql.DB) (err error) {
 					switch constr.typ {
 					case "UNIQUE":
 						column.Unique = true
+						column.Indexed = false
+						column.PrimaryKey = false
 					case "PRIMARY KEY":
+						column.Unique = true
+						column.Indexed = false
 						column.PrimaryKey = true
+					}
+				}
+			} else {
+				index := table.GetIndexByName(constr.name)
+				if index != nil {
+					switch constr.typ {
+					case "UNIQUE":
+						index.Unique = true
+						index.PrimaryKey = false
+					case "PRIMARY KEY":
+						index.Unique = false
+						index.PrimaryKey = true
 					}
 				}
 			}
@@ -432,10 +506,14 @@ func (table *SQLTable) syncColumns(conn *sql.DB) (err error) {
 				return
 			}
 			if columnDefault.Valid {
-				col.Default = columnDefault.String
-				ix := strings.Index(col.Default, "::")
-				if ix >= 0 {
-					col.Default = col.Default[:ix]
+				if strings.Index(columnDefault.String, "nextval") == 0 && col.SQLType == "integer" {
+					col.SQLType = "serial"
+				} else {
+					col.Default = columnDefault.String
+					ix := strings.Index(col.Default, "::")
+					if ix >= 0 {
+						col.Default = col.Default[:ix]
+					}
 				}
 			} else {
 				col.Default = ""
@@ -444,9 +522,6 @@ func (table *SQLTable) syncColumns(conn *sql.DB) (err error) {
 			table.Columns = append(table.Columns, col)
 			table.columnsByName[col.Name] = len(table.Columns) - 1
 		}
-	}
-	if err = table.syncConstraints(conn); err != nil {
-		return
 	}
 	return
 }
@@ -467,6 +542,9 @@ func (table *SQLTable) Sync() (err error) {
 		if err = table.syncIndexes(conn); err != nil {
 			return
 		}
+		if err = table.syncConstraints(conn); err != nil {
+			return
+		}
 		return
 	})
 	return
@@ -474,13 +552,20 @@ func (table *SQLTable) Sync() (err error) {
 
 func (table *SQLTable) AddColumn(column SQLColumn) (err error) {
 	if _, found := table.columnsByName[column.Name]; found {
-		err = errors.New(fmt.Sprintf("Cannot add duplicate column '%s'", column.Name))
+		err = errors.New(fmt.Sprintf("cannot add duplicate column '%s'", column.Name))
 		return
 	}
 	if column.PrimaryKey {
+		for _, i := range table.Indexes {
+			if i.PrimaryKey {
+				err = errors.New(fmt.Sprintf("cannot add primary key column '%s' in addition to current multi-column PK",
+					column.Name))
+				return
+			}
+		}
 		for _, c := range table.Columns {
 			if c.PrimaryKey {
-				err = errors.New(fmt.Sprintf("Cannot add second primary key column '%s'. Current PK is '%s'",
+				err = errors.New(fmt.Sprintf("cannot add second primary key column '%s' in addition to current PK '%s'",
 					column.Name, c.Name))
 				return
 			}
@@ -494,63 +579,76 @@ func (table *SQLTable) AddColumn(column SQLColumn) (err error) {
 func (table *SQLTable) AddIndex(index SQLIndex) (err error) {
 	if index.Name != "" {
 		if _, found := table.indexesByName[index.Name]; found {
-			err = errors.New(fmt.Sprintf("Cannot add duplicate index '%s'", index.Name))
+			err = errors.New(fmt.Sprintf("cannot add duplicate index '%s'", index.Name))
 			return
 		}
 	}
+	if index.PrimaryKey {
+		for _, c := range table.Columns {
+			if c.PrimaryKey {
+				err = errors.New(fmt.Sprintf("cannot set multi-column PK. Current dedicated PK column is '%s'",
+					c.Name))
+				return
+			}
+		}
+	}
 	if len(index.Columns) == 0 {
-		err = errors.New("Cannot add index without columns")
+		err = errors.New("cannot add index without columns")
 		return
 	}
 	for _, columnName := range index.Columns {
 		if _, found := table.columnsByName[columnName]; !found {
-			err = errors.New(fmt.Sprintf("Cannot add index '%s' with not-existent key column '%s'",
+			err = errors.New(fmt.Sprintf("cannot add index '%s' with not-existent key column '%s'",
 				index.Name, columnName))
 			return
 		}
 	}
-	if index.Name == "" {
-		index.Name = table.TableName + "_" + strings.Join(index.Columns, "_")
+	if len(index.Columns) == 1 {
+		c := table.GetColumnByName(index.Columns[0])
+		if index.PrimaryKey {
+			c.Indexed = false
+			c.Unique = false
+			c.Nullable = false
+			c.PrimaryKey = true
+		} else {
+			c.Indexed = true
+		}
+	} else {
+		if index.Name == "" {
+			index.Name = table.TableName + "_" + strings.Join(index.Columns, "_")
+		}
+		table.Indexes = append(table.Indexes, index)
+		table.indexesByName[index.Name] = len(table.Indexes) - 1
+		for _, columnName := range index.Columns {
+			column := table.GetColumnByName(columnName)
+			column.Nullable = false
+		}
 	}
-	table.Indexes = append(table.Indexes, index)
-	table.indexesByName[index.Name] = len(table.Indexes) - 1
 	return
 }
 
-func (table SQLTable) create(conn *sql.DB) (err error) {
-	err = nil
-	s := `{{$Table := .TableName}}{{$Qualified := .QualifiedName}}CREATE TABLE {{$Qualified}} (
-  {{range $i, $c := .Columns}}{{if gt $i 0}},{{end}}
-    {{$c.Name}} {{$c.SQLType}}
-	{{$l := len $c.Default}}{{if gt $l 0}} DEFAULT {{$c.Default}}{{end}}
-	{{if not $c.Nullable}} NOT NULL{{end}}
-	{{if $c.Unique}} UNIQUE{{end}}
-	{{if $c.PrimaryKey}} PRIMARY KEY{{end}}
+var createTable = SQLTemplate{Name: "CreateTable", SQL: `{{$Table := .TableName}}{{$Qualified := .QualifiedName}}
+{{define "indexcolumns"}}({{range $i, $col := .Columns}}{{if gt $i 0}}, {{end}}"{{$col}}"{{end}}){{end}}
+CREATE TABLE {{$Qualified}} (
+  {{range $i, $c := .Columns}}
+    {{if gt $i 0}},{{end}}"{{$c.Name}}" {{$c.SQLType}}{{$l := len $c.Default}}{{if gt $l 0}} DEFAULT {{$c.Default}}{{end}}{{if not $c.Nullable}} NOT NULL{{end}}{{if $c.Unique}} UNIQUE{{end}}{{if $c.PrimaryKey}} PRIMARY KEY{{end}}
+  {{end}}
+  {{range .Indexes}}
+    {{if .PrimaryKey}}, CONSTRAINT "{{.Name}}" PRIMARY KEY {{template "indexcolumns" .}}{{end}}
   {{end}}
 );
   {{range $c := .Columns}}
 	{{if $c.Indexed}}
-CREATE INDEX "{{$Table}}_{{$c.Name}} " ON {{$Qualified}} ("{{$c.Name}}");
+CREATE INDEX "{{$Table}}_{{$c.Name}}" ON {{$Qualified}} ("{{$c.Name}}");
     {{end}}
   {{end}}
   {{range .Indexes}}
-CREATE{{if .Unique}} UNIQUE{{end}} INDEX "{{.Name}}" 
-ON {{$Qualified}} ({{range $colix, $col := .Columns}}{{if gt $colix 0}}, {{end}}"{{$col}}"{{end}})
-  {{end}}
-`
-	tmpl, err := template.New("CreateTable " + table.TableName).Parse(s)
-	if err != nil {
-		return
-	}
-	var buf bytes.Buffer
-	if err = tmpl.Execute(&buf, table); err != nil {
-		return
-	}
-	sqlText := string(buf.Bytes())
-	if _, err = conn.Exec(sqlText); err != nil {
-		return
-	}
-	return
+{{if not .PrimaryKey}}CREATE{{if .Unique}} UNIQUE{{end}} INDEX "{{.Name}}" ON {{$Qualified}} {{template "indexcolumns" .}}{{end}};
+  {{end}} 
+`}
+
+func (table SQLTable) create(conn *sql.DB) (err error) {
+	return createTable.Exec(conn, table)
 }
 
 func (table SQLTable) alterAddColumn(conn *sql.DB, column SQLColumn) (err error) {
@@ -747,4 +845,3 @@ func (table SQLTable) Drop() (err error) {
 		return
 	})
 }
-

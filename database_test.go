@@ -52,7 +52,7 @@ func TestSQLTable_Exists(t *testing.T) {
 
 var TableName = "TestTable"
 var TableColumns = []SQLColumn{
-	{Name: "primarykey", SQLType: "text", Nullable: false, Default: "", PrimaryKey: true},
+	{Name: "primarykey", SQLType: "text", Nullable: false, Default: "", PrimaryKey: true, Unique: true},
 	{Name: "indexedcolumn", SQLType: "integer", Nullable: true, Default: "42", Indexed: true},
 	{Name: "uniquecolumn", SQLType: "text", Nullable: false, Default: "''", Unique: true},
 	{Name: "compoundindex_1", SQLType: "text", Nullable: false, Default: "''", Unique: false},
@@ -60,9 +60,8 @@ var TableColumns = []SQLColumn{
 }
 var TableIndexes = []SQLIndex{
 	{
-		TableName: TableName,
-		Columns: []string {"compoundindex_1", "compoundindex_2"},
-		Unique: true,
+		Columns: []string{"compoundindex_1", "compoundindex_2"},
+		Unique:  true,
 	},
 }
 
@@ -78,19 +77,23 @@ var AddedColumn = SQLColumn{
 	Indexed:    false,
 }
 
-func createTestTable(t *testing.T, pg *PostgreSQLAdapter) SQLTable {
-	table := pg.makeTable(TableName)
-	for _, col := range TableColumns {
+func createTableByDef(t *testing.T, pg *PostgreSQLAdapter, name string, columns []SQLColumn, indexes []SQLIndex) SQLTable {
+	table := pg.makeTable(name)
+	for _, col := range columns {
 		if err := table.AddColumn(col); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, index := range TableIndexes {
+	for _, index := range indexes {
 		if err := table.AddIndex(index); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return table
+}
+
+func createTestTable(t *testing.T, pg *PostgreSQLAdapter) SQLTable {
+	return createTableByDef(t, pg, TableName, TableColumns, TableIndexes)
 }
 
 func equals(table1 SQLTable, table2 SQLTable) (bool, error) {
@@ -160,7 +163,7 @@ func TestSQLTable_Reconcile_1(t *testing.T) {
 }
 
 // Verify that created table is identical to defined one
-func TestPostgreSQLAdapter_Sync_1(t *testing.T) {
+func TestSQLTable_Sync_1(t *testing.T) {
 	pg := GetPostgreSQLAdapter()
 	current := pg.makeTable(TableName)
 	var exists bool
@@ -267,5 +270,64 @@ func TestSQLTable_Drop(t *testing.T) {
 	err = bogus.Drop()
 	if err != nil {
 		t.Error(err)
+	}
+}
+
+var TableName2 = "TestTable2"
+var TableColumns2 = []SQLColumn{
+	{Name: "primarykey1", SQLType: "text", Nullable: false, Default: "", PrimaryKey: false, Unique: true},
+	{Name: "primarykey2", SQLType: "integer", Nullable: false, Default: "", PrimaryKey: false},
+	{Name: "indexedcolumn", SQLType: "integer", Nullable: true, Default: "42", Indexed: true},
+	{Name: "uniquecolumn", SQLType: "text", Nullable: false, Default: "''", Unique: true},
+	{Name: "compoundindex_1", SQLType: "text", Nullable: false, Default: "''", Unique: false},
+	{Name: "compoundindex_2", SQLType: "integer", Nullable: false, Default: "12", Unique: false},
+}
+var TableIndexes2 = []SQLIndex{
+	{
+		Columns:    []string{"primarykey1", "primarykey2"},
+		PrimaryKey: true,
+	},
+	{
+		Columns: []string{"uniquecolumn", "compoundindex_1"},
+		Unique:  true,
+	},
+	{
+		Columns: []string{"compoundindex_1", "compoundindex_2"},
+		Unique:  false,
+	},
+}
+
+func createTestTable2(t *testing.T, pg *PostgreSQLAdapter) SQLTable {
+	return createTableByDef(t, pg, TableName2, TableColumns2, TableIndexes2)
+}
+
+// Verify that created table is identical to defined one
+func TestSQLTable_Sync_2(t *testing.T) {
+	pg := GetPostgreSQLAdapter()
+	table := createTestTable2(t, pg)
+	var exists bool
+	var err error
+	if exists, err = table.Exists(); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Fatalf("Table '%s' already exists", TableName2)
+	}
+	if err = table.Reconcile(); err != nil {
+		t.Fatalf("Could not reconcile table: %s", err)
+	}
+	current := pg.makeTable(TableName2)
+	if exists, err = current.Exists(); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Errorf("Table '%s' does not exists", TableName2)
+	}
+	err = current.Sync()
+	if err != nil {
+		t.Error(err)
+	}
+	if eq, err := equals(current, table); !eq {
+		t.Error("Current and original table different", err)
 	}
 }
