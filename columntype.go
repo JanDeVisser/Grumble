@@ -74,6 +74,12 @@ func (columnType *BasicColumnType) Scanners(column Column, scanners []interface{
 	return append(scanners, &BasicScanner{FieldName: column.FieldName, FieldValues: values}), nil
 }
 
+// -- S E T T E R -----------------------------------------------------------
+
+type Setter interface {
+	SetValue(Persistable, Column, interface{}) error
+}
+
 // -- R E F E R E N C E S ---------------------------------------------------
 
 type ReferenceScanner struct {
@@ -87,30 +93,41 @@ type ReferenceScanner struct {
 func (scanner *ReferenceScanner) Scan(src interface{}) (err error) {
 	switch scanner.count {
 	case 0:
-		if k, ok := src.(string); ok {
-			scanner.kind = GetKindForKind(k)
-			if scanner.kind == nil {
+		scanner.kind = nil
+		switch k := src.(type) {
+		case string:
+			kind := GetKindForKind(k)
+			switch {
+			case kind == nil:
 				err = errors.New(fmt.Sprintf("unknown kind '%s'", k))
-				return
-			}
-			if !scanner.kind.DerivesFrom(scanner.BaseKind) {
+			case !kind.DerivesFrom(scanner.BaseKind):
 				err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'",
 					k, scanner.BaseKind.Kind))
-				return
+			default:
+				scanner.kind = kind
 			}
+		case nil:
+			scanner.kind = nil
+		default:
+			err = errors.New(fmt.Sprintf("ReferenceScanner expected string kind, not '%q', (%T)", src, src))
 		}
 	case 1:
-		if id, ok := src.(int); ok {
-			e, err := scanner.kind.Make("", id)
+		scanner.count = -1
+		switch id := src.(type) {
+		case int64:
+			e, err := scanner.kind.Make("", int(id))
 			if err != nil {
 				return err
 			}
 			scanner.FieldValues[scanner.FieldName] = e
+		case nil:
+			scanner.FieldValues[scanner.FieldName] = nil
+		default:
+			err = errors.New(fmt.Sprintf("ReferenceScanner expected string kind, not '%q', (%T)", src, src))
 		}
-		scanner.count = -1
 	}
 	scanner.count++
-	return nil
+	return
 }
 
 type ReferenceType struct {
@@ -132,8 +149,8 @@ func (ref *ReferenceType) Value(e Persistable, column Column) (values []interfac
 	value := fieldValue.Interface()
 	if reference, ok := value.(Persistable); ok {
 		kind := reference.Kind()
-		if !kind.DerivesFrom(column.Kind) {
-			err = errors.New(fmt.Sprintf("Kind '%s' does not derive from '%s'", kind.Kind, column.Kind.Kind))
+		if !kind.DerivesFrom(ref.References) {
+			err = errors.New(fmt.Sprintf("Kind '%s' does not derive from '%s'", kind.Kind, ref.References.Kind))
 			return
 		}
 		values = []interface{}{kind.Kind, reference.Id()}
@@ -162,4 +179,26 @@ func (ref *ReferenceType) Scanners(column Column, scanners []interface{}, values
 	scanner.FieldName = column.FieldName
 	scanner.FieldValues = values
 	return append(scanners, scanner, scanner), nil
+}
+
+func (ref *ReferenceType) SetValue(e Persistable, column Column, value interface{}) error {
+	ev := reflect.ValueOf(e).Elem()
+	fld := ev.FieldByIndex(column.Index)
+
+	reference, ok := value.(Persistable)
+	if !ok {
+		return errors.New(fmt.Sprintf("can't assign values of type '%T' to column %s.%s",
+			value, column.Kind.Kind, column.FieldName))
+	}
+	v := reflect.ValueOf(value).Elem()
+	var k = reference.Kind()
+	for ; k != nil && k.Kind != ref.References.Kind; k = k.base {
+		v = v.FieldByIndex([]int{k.baseIndex})
+	}
+	if k == nil {
+		return errors.New(fmt.Sprintf("can't assign entity of kind '%s' to column %s.%s",
+			reference.Kind().Kind, column.Kind.Kind, column.FieldName))
+	}
+	fld.Set(v.Addr())
+	return nil
 }

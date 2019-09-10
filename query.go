@@ -190,15 +190,28 @@ func (table *QueryTable) IsAggregated() bool {
 	return len(table.Aggregates) > 0 && table.Query.IsGrouped() && !table.GroupBy
 }
 
+func (table *QueryTable) AddFilter(field string, value interface{}) *QueryTable {
+	column, ok := table.Kind.ColumnByFieldName(field)
+	if !ok {
+		return table
+	}
+	table.AddCondition(Predicate{
+		Expression: fmt.Sprintf("__alias__.\"%s\"", column.ColumnName),
+		Operator:   "=",
+		Value:      value,
+	})
+	return table
+}
+
 // --------------------------------------------------------------------------
 
 type JoinType string
 
 const (
 	Inner JoinType = "INNER"
-	Outer          = "OUTER"
+	Outer          = "LEFT"
 	Right          = "INNER"
-	Left           = "OUTER"
+	Left           = "LEFT"
 	Cross          = "CROSS"
 )
 
@@ -214,11 +227,26 @@ func (join Join) JoinClause() string {
 	}
 	clause := ""
 	if join.FieldName != "" {
-		column, ok := join.Query.Kind.ColumnByFieldName(join.FieldName)
-		if ok {
-			clause = fmt.Sprintf("%s JOIN %s ON (%s.\"_id\" = %s.\"%s\")",
-				join.JoinType, join.Alias, join.Alias, join.Query.Alias, column.ColumnName)
+		if join.JoinType == "INNER" || join.JoinType == "CROSS" {
+			column, ok := join.Query.Kind.ColumnByFieldName(join.FieldName)
+			if ok {
+				clause = fmt.Sprintf("%s JOIN %s ON (%s.\"_id\" = %s.\"%sId\" AND %s.\"_kind\" = %s.\"%sKind\")",
+					join.JoinType, join.Alias,
+					join.Alias, join.Query.Alias, column.ColumnName,
+					join.Alias, join.Query.Alias, column.ColumnName)
+			}
+		} else {
+			column, ok := join.Kind.ColumnByFieldName(join.FieldName)
+			if ok {
+				clause = fmt.Sprintf("%s JOIN %s ON (%s.\"_id\" = %s.\"%sId\" AND %s.\"_kind\" = %s.\"%sKind\")",
+					join.JoinType, join.Alias,
+					join.Query.Alias, join.Alias, column.ColumnName,
+					join.Query.Alias, join.Alias, column.ColumnName)
+			}
 		}
+	}
+	if clause == "" {
+		panic("Could not render join clause")
 	}
 	return clause
 }
@@ -238,7 +266,9 @@ func MakeQuery(obj interface{}) *Query {
 	case Key:
 		kind = e.kind
 	case Persistable:
-		SetKind(e)
+		if e.Kind() == nil {
+			SetKind(e)
+		}
 		kind = e.Kind()
 	case *Kind:
 		kind = e
@@ -248,19 +278,6 @@ func MakeQuery(obj interface{}) *Query {
 	query := new(Query)
 	query.Kind = kind
 	query.Query = query
-	return query
-}
-
-func (query *Query) AddFilter(field string, value interface{}) *Query {
-	column, ok := query.Kind.ColumnByFieldName(field)
-	if !ok {
-		return query
-	}
-	query.AddCondition(Predicate{
-		Expression: fmt.Sprintf("__alias__.\"%s", column.ColumnName),
-		Operator:   "=",
-		Value:      value,
-	})
 	return query
 }
 
@@ -322,11 +339,12 @@ WITH
 		)
 	{{range .Joins}},
 		{{.Alias}} AS (
-			SELECT '{{.Kind.Kind}}' "_kind", {{.Kind.QualifiedTableName}}."_parent", {{.Kind.QualifiedTableName}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
+			SELECT '{{.Kind.Kind}}' "_kind", "_parent", "_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
 				FROM {{.Kind.QualifiedTableName}}
+			{{$JoinKind := .Kind}}
 			{{if .WithDerived}}{{range .Kind.DerivedKinds}}
 			UNION ALL
-			SELECT '{{.Kind}}' "_kind", "_parent", "_id"{{range $.Kind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
+			SELECT '{{.Kind}}' "_kind", "_parent", "_id"{{range $JoinKind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
 				FROM {{.QualifiedTableName}}
 			{{end}}{{end}}
 			{{if gt .Conditions.Size 0}}
@@ -337,13 +355,13 @@ WITH
 SELECT
 	{{with .GroupedBy}}{{$JoinAlias := .Alias}}
 	{{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $JoinAlias false}}{{end}}
-	{{range $i, $t := .AggregatedTables}}{{$AggAlias := .Alias}}
+	{{range $i, $t := $.AggregatedTables}}{{$AggAlias := .Alias}}
 	{{range .Aggregates}}, {{.SQLText $AggAlias}}{{end}}
 	{{end}}
 	{{else}}
 	{{$.Alias}}."_kind", {{$.Alias}}."_parent", {{$.Alias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $.Alias false}}{{end}}
 	{{range .Joins}}{{$JoinAlias := .Alias}}
-	, {{$JoinAlias}}."_parent", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $JoinAlias false}}{{end}}
+	, {{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $JoinAlias false}}{{end}}
 	{{end}}
 	{{end}}
 	FROM {{$.Alias}}
@@ -360,6 +378,7 @@ func (query *Query) SQL() (s string, values []interface{}) {
 	}
 	s, err := querySQL.Process(query)
 	if err != nil {
+		panic(err)
 		return
 	}
 	values = make([]interface{}, 0)
@@ -432,10 +451,13 @@ type KindScanner struct {
 }
 
 func (scanner *KindScanner) Scan(value interface{}) (err error) {
-	if parent, ok := value.(string); ok {
-		scanner.kind = parent
-	} else {
-		err = errors.New("expected string entity parent")
+	switch kind := value.(type) {
+	case string:
+		scanner.kind = kind
+	case nil:
+		scanner.kind = ""
+	default:
+		err = errors.New(fmt.Sprintf("expected string entity kind, got '%q' (%T)", value, value))
 	}
 	return
 }
@@ -445,10 +467,13 @@ type ParentScanner struct {
 }
 
 func (scanner *ParentScanner) Scan(value interface{}) (err error) {
-	if parent, ok := value.(string); ok {
+	switch parent := value.(type) {
+	case string:
 		scanner.parent = parent
-	} else {
-		err = errors.New("expected string entity parent")
+	case nil:
+		scanner.parent = ""
+	default:
+		err = errors.New(fmt.Sprintf("expected string entity parent, got '%q' (%T)", value, value))
 	}
 	return
 }
@@ -458,10 +483,13 @@ type IDScanner struct {
 }
 
 func (scanner *IDScanner) Scan(value interface{}) (err error) {
-	if id, ok := value.(int64); ok {
+	switch id := value.(type) {
+	case int64:
 		scanner.id = int(id)
-	} else {
-		err = errors.New(fmt.Sprintf("expected int entity ID, not '%q' (%T)", value, value))
+	case nil:
+		scanner.id = 0
+	default:
+		err = errors.New(fmt.Sprintf("expected string entity parent, got '%q' (%T)", value, value))
 	}
 	return
 }
@@ -509,6 +537,14 @@ func (scanner *EntityScanner) SQLScanners(scanners []interface{}) (ret []interfa
 }
 
 func (scanner *EntityScanner) Build() (entity Persistable, err error) {
+	if scanner.kind == "" {
+		entity = &Key{
+			kind:   nil,
+			parent: "",
+			id:     0,
+		}
+		return
+	}
 	kind := GetKindForKind(scanner.kind)
 	if kind == nil {
 		err = errors.New(fmt.Sprintf("unknown kind '%s'", scanner.kind))

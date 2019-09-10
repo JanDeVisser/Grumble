@@ -32,6 +32,7 @@ type Kind struct {
 	table         *SQLTable
 	typ           reflect.Type
 	base          *Kind
+	baseIndex     int
 	derived       []*Kind
 }
 
@@ -181,7 +182,7 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 	kind.Columns = make([]Column, 0)
 	kind.columnsByName = make(map[string]int)
 	kind.typ = t
-	entityFound := false
+	keyFound := false
 	for i := 0; i < t.NumField(); i++ {
 		fld := t.Field(i)
 		objFld := s.Field(i)
@@ -196,7 +197,7 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 			if kind.base != nil {
 				panic(fmt.Sprintf("Kind '%s' can't embed Entity directly and have a base Kind", kind.Kind))
 			}
-			entityFound = true
+			keyFound = true
 		case fld.Type.Kind() == reflect.Struct && fld.Type.String() == "time/Time":
 			if ok {
 				kind.AddColumn(fld, objFld, ParseTag(tagString))
@@ -208,8 +209,8 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 				if kind.base != nil {
 					panic(fmt.Sprintf("Kind '%s': Multiple inheritance not supported.", kind.Kind))
 				}
-				if entityFound {
-					panic(fmt.Sprintf("Kind '%s' can't embed Entity directly and have a base Kind", kind.Kind))
+				if keyFound {
+					panic(fmt.Sprintf("Kind '%s' can't embed Key directly and have a base Kind", kind.Kind))
 				}
 				kind.SetBaseKind(i, fld, structKind)
 			}
@@ -245,6 +246,7 @@ func (k *Kind) addColumn(column Column) {
 func (k *Kind) SetBaseKind(index int, field reflect.StructField, base *Kind) {
 	k.parseEntityTag(field.Tag.Get("grumble"))
 	k.base = base
+	k.baseIndex = index
 	base.AddDerivedKind(k)
 	for _, column := range base.Columns {
 		derivedColumn := column

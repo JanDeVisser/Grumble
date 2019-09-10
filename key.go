@@ -66,6 +66,7 @@ func ParseKey(key string) (k *Key, err error) {
 func (key *Key) Initialize(parent string, id int) *Key {
 	key.parent = parent
 	key.id = id
+	SetKind(key)
 	return key
 }
 
@@ -166,8 +167,15 @@ func Populate(e Persistable, values map[string]interface{}) (ret Persistable, er
 		column, ok := k.Column(name)
 		switch {
 		case ok && value != nil:
-			field := v.FieldByIndex(column.Index)
-			field.Set(reflect.ValueOf(value))
+			if setter, ok := column.ColumnType.(Setter); ok {
+				err = setter.SetValue(e, column, value)
+				if err != nil {
+					return
+				}
+			} else {
+				field := v.FieldByIndex(column.Index)
+				field.Set(reflect.ValueOf(value))
+			}
 		case !ok:
 			field := v.FieldByName(name)
 			if field.IsValid() {
@@ -193,6 +201,11 @@ func Get(e Persistable, id int) (ret Persistable, err error) {
 	if err != nil {
 		return
 	}
+	return
+}
+
+func Inflate(e Persistable) (err error) {
+	_, err = Get(e, e.Id())
 	return
 }
 
