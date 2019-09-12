@@ -1,11 +1,11 @@
 package grumble
 
 type Persistable interface {
-	Initialize(string, int) *Key
+	Initialize(*Key, int) *Key
 	SetKind(*Kind)
 	Kind() *Kind
 	Parent() *Key
-	AsKey() Key
+	AsKey() *Key
 	Id() int
 	Self() (Persistable, error)
 	Populated() bool

@@ -68,15 +68,18 @@ type HasParent struct {
 }
 
 func (cond HasParent) WhereClause(alias string) string {
-	return fmt.Sprintf("%s.\"_parent\" = __count__", alias)
+	return fmt.Sprintf("(%s.\"ParentKind\" = __count__ AND %s.\"ParentId\" = __count__)", alias, alias)
 }
 
 func (cond HasParent) Values(values []interface{}) []interface{} {
-	s := ""
-	if cond.Parent != nil {
-		s = cond.Parent.String()
+	if cond.Parent == nil {
+		cond.Parent = ZeroKey
 	}
-	return append(values, s)
+	k := ""
+	if !cond.Parent.IsZero() {
+		k = cond.Parent.Kind().Kind
+	}
+	return append(values, k, cond.Parent.Id())
 }
 
 // --------------------------------------------------------------------------
@@ -156,12 +159,25 @@ func (agg Aggregate) SQLText(alias string) string {
 
 // --------------------------------------------------------------------------
 
+type Computed struct {
+	Formula string
+	Name    string
+	Query   *Query
+}
+
+func (computed Computed) SQLFormula() string {
+	return fmt.Sprintf("%s \"%s\"", computed.Formula, computed.Name)
+}
+
+// --------------------------------------------------------------------------
+
 type QueryTable struct {
 	Kind        *Kind
 	WithDerived bool
 	Alias       string
 	Conditions  CompoundCondition
 	GroupBy     bool
+	Computed    []Computed
 	Aggregates  []Aggregate
 	Query       *Query
 }
@@ -179,6 +195,16 @@ func (table *QueryTable) AddAggregate(agg Aggregate) *QueryTable {
 	}
 	table.Aggregates = append(table.Aggregates, agg)
 	return table
+}
+
+func (table *QueryTable) AddComputedColumn(computed Computed) *QueryTable {
+	computed.Query = table.Query
+	if table.Computed == nil {
+		table.Computed = make([]Computed, 0)
+	}
+	table.Computed = append(table.Computed, computed)
+	return table
+
 }
 
 func (table *QueryTable) AddCondition(cond Condition) *QueryTable {
@@ -200,6 +226,17 @@ func (table *QueryTable) AddFilter(field string, value interface{}) *QueryTable 
 		Operator:   "=",
 		Value:      value,
 	})
+	return table
+}
+
+func (table *QueryTable) HasParent(parent Persistable) *QueryTable {
+	var pk *Key
+	if parent != nil {
+		pk = parent.AsKey()
+	} else {
+		pk = ZeroKey
+	}
+	table.AddCondition(HasParent{Parent: pk})
 	return table
 }
 
@@ -322,6 +359,19 @@ func (query *Query) AggregatedTables() []*QueryTable {
 	return ret
 }
 
+func (query *Query) TablesWithComputes() []*QueryTable {
+	ret := make([]*QueryTable, 0)
+	if len(query.Computed) > 0 {
+		ret = append(ret, &query.QueryTable)
+	}
+	for _, join := range query.Joins {
+		if len(query.Computed) > 0 {
+			ret = append(ret, &join.QueryTable)
+		}
+	}
+	return ret
+}
+
 func (query *Query) IsGrouped() bool {
 	return query.GroupedBy() != nil
 }
@@ -329,22 +379,30 @@ func (query *Query) IsGrouped() bool {
 var querySQL = SQLTemplate{Name: "Query", SQL: `
 WITH 
 	{{.Alias}} AS (
-		SELECT '{{.Kind.Kind}}' "_kind", {{.Kind.QualifiedTableName}}."_parent", {{.Kind.QualifiedTableName}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
+		SELECT '{{.Kind.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+				{{range .Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+				{{range .Computed}}, {{.SQLFormula}}{{end}} 
 			FROM {{.Kind.QualifiedTableName}}
 		{{if .WithDerived}}{{range .Kind.DerivedKinds}}
 		UNION ALL
-		SELECT '{{.Kind}}' "_kind", "_parent", "_id"{{range $.Kind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
+		SELECT '{{.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+ 				{{range $.Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+				{{range $.Computed}}, {{.SQLFormula}}{{end}} 
 			FROM {{.QualifiedTableName}}
 		{{end}}{{end}}
 		)
 	{{range .Joins}},
 		{{.Alias}} AS (
-			SELECT '{{.Kind.Kind}}' "_kind", "_parent", "_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
+			SELECT '{{.Kind.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+                 	{{range .Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+				    {{range .Computed}}, {{.SQLFormula}}{{end}} 
 				FROM {{.Kind.QualifiedTableName}}
-			{{$JoinKind := .Kind}}
+			{{$Join := .}}
 			{{if .WithDerived}}{{range .Kind.DerivedKinds}}
 			UNION ALL
-			SELECT '{{.Kind}}' "_kind", "_parent", "_id"{{range $JoinKind.Columns}}, {{.ColumnType.SQLTextIn . "" true}}{{end}} 
+			SELECT '{{.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+					{{range $Join.Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+					{{range $Join.Computed}}, {{.SQLFormula}}{{end}} 
 				FROM {{.QualifiedTableName}}
 			{{end}}{{end}}
 			{{if gt .Conditions.Size 0}}
@@ -354,21 +412,27 @@ WITH
 	{{end}}
 SELECT
 	{{with .GroupedBy}}{{$JoinAlias := .Alias}}
-	{{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $JoinAlias false}}{{end}}
+	{{$JoinAlias}}."_kind", {{$JoinAlias}}."ParentKind", {{$JoinAlias}}."ParentId", {{$JoinAlias}}."_id"
+		{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
+		{{range .Computed}}, "{{.Name}}"{{end}}
 	{{range $i, $t := $.AggregatedTables}}{{$AggAlias := .Alias}}
 	{{range .Aggregates}}, {{.SQLText $AggAlias}}{{end}}
 	{{end}}
 	{{else}}
-	{{$.Alias}}."_kind", {{$.Alias}}."_parent", {{$.Alias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $.Alias false}}{{end}}
+	{{$.Alias}}."_kind", {{$.Alias}}."ParentKind", {{$.Alias}}."ParentId", {{$.Alias}}."_id"
+		{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $.Alias false}}{{end}}
+		{{range .Computed}}, "{{.Name}}"{{end}}
 	{{range .Joins}}{{$JoinAlias := .Alias}}
-	, {{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $JoinAlias false}}{{end}}
+		, {{$JoinAlias}}."_kind", {{$JoinAlias}}."ParentKind", {{$JoinAlias}}."ParentId", {{$JoinAlias}}."_id"
+		{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
+		{{range .Computed}}, "{{.Name}}"{{end}}
 	{{end}}
 	{{end}}
 	FROM {{$.Alias}}
 	{{range .Joins}}{{.JoinClause}}{{end}}
 	{{if gt .Conditions.Size 0}}WHERE {{.Conditions.WhereClause .Alias}}{{end}}
 	{{with .GroupedBy}}{{$JoinAlias := .Alias}}
-	GROUP BY {{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.ColumnType.SQLTextIn . $JoinAlias false}}{{end}}
+	GROUP BY {{$JoinAlias}}."_kind", {{$JoinAlias}}."ParentKind", {{$JoinAlias}}."ParentId", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
 	{{end}}
 `}
 
@@ -447,34 +511,58 @@ func (query *Query) ExecuteSingle(e Persistable) (ret Persistable, err error) {
 // -- E N T I T Y S C A N N E R ---------------------------------------------
 
 type KindScanner struct {
-	kind string
+	kind *Kind
 }
 
 func (scanner *KindScanner) Scan(value interface{}) (err error) {
-	switch kind := value.(type) {
+	switch k := value.(type) {
 	case string:
-		scanner.kind = kind
+		if k != "" {
+			kind := GetKindForKind(k)
+			if kind == nil {
+				err = errors.New(fmt.Sprintf("Unknown kind '%s'", k))
+				return
+			}
+			scanner.kind = kind
+		} else {
+			scanner.kind = nil
+		}
 	case nil:
-		scanner.kind = ""
+		scanner.kind = nil
 	default:
-		err = errors.New(fmt.Sprintf("expected string entity kind, got '%q' (%T)", value, value))
+		err = errors.New(fmt.Sprintf("expected string entity kind, got '%v' (%T)", value, value))
 	}
 	return
 }
 
 type ParentScanner struct {
-	parent string
+	KindScanner
+	IDScanner
+	Parent *Key
+	count  int
 }
 
 func (scanner *ParentScanner) Scan(value interface{}) (err error) {
-	switch parent := value.(type) {
-	case string:
-		scanner.parent = parent
-	case nil:
-		scanner.parent = ""
-	default:
-		err = errors.New(fmt.Sprintf("expected string entity parent, got '%q' (%T)", value, value))
+	switch scanner.count {
+	case 0:
+		if err = scanner.KindScanner.Scan(value); err != nil {
+			return
+		}
+	case 1:
+		if err = scanner.IDScanner.Scan(value); err != nil {
+			return
+		}
+		if scanner.kind == nil {
+			scanner.Parent = ZeroKey
+		} else {
+			if scanner.Parent, err = CreateKey(nil, scanner.kind, scanner.id); err != nil {
+				return
+			}
+
+		}
+		scanner.count = -1
 	}
+	scanner.count++
 	return
 }
 
@@ -509,8 +597,18 @@ func makeEntityScanner(query *Query, table *QueryTable) *EntityScanner {
 	ret := new(EntityScanner)
 	ret.Query = query
 	ret.Kind = table.Kind
+	if len(table.Computed) > 0 {
+		if ret.SyntheticColumns == nil {
+			ret.SyntheticColumns = make([]string, 0)
+		}
+		for _, computed := range table.Computed {
+			ret.SyntheticColumns = append(ret.SyntheticColumns, computed.Name)
+		}
+	}
 	if table.GroupBy {
-		ret.SyntheticColumns = make([]string, 0)
+		if ret.SyntheticColumns == nil {
+			ret.SyntheticColumns = make([]string, 0)
+		}
 		for _, aggregated := range query.AggregatedTables() {
 			for _, agg := range aggregated.Aggregates {
 				ret.SyntheticColumns = append(ret.SyntheticColumns, agg.Name)
@@ -522,9 +620,9 @@ func makeEntityScanner(query *Query, table *QueryTable) *EntityScanner {
 }
 
 func (scanner *EntityScanner) SQLScanners(scanners []interface{}) (ret []interface{}, err error) {
-	scanners = append(scanners, &scanner.KindScanner, &scanner.ParentScanner, &scanner.IDScanner)
+	scanners = append(scanners, &scanner.KindScanner, &scanner.ParentScanner, &scanner.ParentScanner, &scanner.IDScanner)
 	for _, column := range scanner.Kind.Columns {
-		scanners, err = column.ColumnType.Scanners(column, scanners, scanner.values)
+		scanners, err = column.Converter.Scanners(column, scanners, scanner.values)
 		if err != nil {
 			return
 		}
@@ -537,24 +635,15 @@ func (scanner *EntityScanner) SQLScanners(scanners []interface{}) (ret []interfa
 }
 
 func (scanner *EntityScanner) Build() (entity Persistable, err error) {
-	if scanner.kind == "" {
-		entity = &Key{
-			kind:   nil,
-			parent: "",
-			id:     0,
-		}
+	if scanner.kind == nil {
+		entity = ZeroKey
 		return
 	}
-	kind := GetKindForKind(scanner.kind)
-	if kind == nil {
-		err = errors.New(fmt.Sprintf("unknown kind '%s'", scanner.kind))
+	if !scanner.kind.DerivesFrom(scanner.Kind) {
+		err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'", scanner.kind.Kind, scanner.Kind.Kind))
 		return
 	}
-	if !kind.DerivesFrom(scanner.Kind) {
-		err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'", scanner.kind, scanner.Kind.Kind))
-		return
-	}
-	entity, err = kind.Make(scanner.ParentScanner.parent, scanner.IDScanner.id)
+	entity, err = scanner.kind.Make(scanner.Parent, scanner.IDScanner.id)
 	if err != nil {
 		return
 	}

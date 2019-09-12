@@ -4,9 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 )
 
-type ColumnType interface {
+type Converter interface {
 	SQLType(Column) string
 	SQLTextOut(Column) string
 	Value(Persistable, Column) ([]interface{}, error)
@@ -14,21 +15,29 @@ type ColumnType interface {
 	Scanners(Column, []interface{}, map[string]interface{}) ([]interface{}, error)
 }
 
-var ColumnTypes = map[reflect.Kind]ColumnType{
-	reflect.Bool:    &BasicColumnType{"boolean"},
-	reflect.Int:     &BasicColumnType{"integer"},
-	reflect.Int8:    &BasicColumnType{"integer"},
-	reflect.Int16:   &BasicColumnType{"integer"},
-	reflect.Int32:   &BasicColumnType{"integer"},
-	reflect.Int64:   &BasicColumnType{"integer"},
-	reflect.Uint:    &BasicColumnType{"integer"},
-	reflect.Uint8:   &BasicColumnType{"integer"},
-	reflect.Uint16:  &BasicColumnType{"integer"},
-	reflect.Uint32:  &BasicColumnType{"integer"},
-	reflect.Uint64:  &BasicColumnType{"integer"},
-	reflect.Float32: &BasicColumnType{"float"},
-	reflect.Float64: &BasicColumnType{"float"},
-	reflect.String:  &BasicColumnType{"text"},
+type Adapter interface {
+	Converter(field reflect.StructField, tags *Tags) Converter
+}
+
+var ConvertersForKind = map[reflect.Kind]Converter{
+	reflect.Bool:    &BasicConverter{"boolean"},
+	reflect.Int:     &BasicConverter{"integer"},
+	reflect.Int8:    &BasicConverter{"integer"},
+	reflect.Int16:   &BasicConverter{"integer"},
+	reflect.Int32:   &BasicConverter{"integer"},
+	reflect.Int64:   &BasicConverter{"integer"},
+	reflect.Uint:    &BasicConverter{"integer"},
+	reflect.Uint8:   &BasicConverter{"integer"},
+	reflect.Uint16:  &BasicConverter{"integer"},
+	reflect.Uint32:  &BasicConverter{"integer"},
+	reflect.Uint64:  &BasicConverter{"integer"},
+	reflect.Float32: &BasicConverter{"float"},
+	reflect.Float64: &BasicConverter{"float"},
+	reflect.String:  &BasicConverter{"text"},
+}
+
+var ConvertersForType = map[reflect.Type]Converter{
+	reflect.TypeOf(time.Time{}): &BasicConverter{"timestamp"},
 }
 
 // -- B A S I C  T Y P E S --------------------------------------------------
@@ -46,31 +55,31 @@ func (scanner *BasicScanner) Scan(value interface{}) (err error) {
 	return
 }
 
-type BasicColumnType struct {
+type BasicConverter struct {
 	sqlType string
 }
 
-func (columnType *BasicColumnType) SQLType(column Column) string {
-	return columnType.sqlType
+func (converter *BasicConverter) SQLType(column Column) string {
+	return converter.sqlType
 }
 
-func (columnType *BasicColumnType) SQLTextOut(column Column) string {
+func (converter *BasicConverter) SQLTextOut(column Column) string {
 	return "__count__"
 }
 
-func (columnType *BasicColumnType) Value(e Persistable, column Column) ([]interface{}, error) {
+func (converter *BasicConverter) Value(e Persistable, column Column) ([]interface{}, error) {
 	v := reflect.ValueOf(e).Elem()
 	return []interface{}{v.FieldByIndex(column.Index).Interface()}, nil
 }
 
-func (columnType *BasicColumnType) SQLTextIn(column Column, alias string, with bool) string {
+func (converter *BasicConverter) SQLTextIn(column Column, alias string, with bool) string {
 	if alias != "" {
 		alias = alias + "."
 	}
 	return fmt.Sprintf("%s\"%s\"", alias, column.ColumnName)
 }
 
-func (columnType *BasicColumnType) Scanners(column Column, scanners []interface{}, values map[string]interface{}) ([]interface{}, error) {
+func (converter *BasicConverter) Scanners(column Column, scanners []interface{}, values map[string]interface{}) ([]interface{}, error) {
 	return append(scanners, &BasicScanner{FieldName: column.FieldName, FieldValues: values}), nil
 }
 
@@ -115,7 +124,7 @@ func (scanner *ReferenceScanner) Scan(src interface{}) (err error) {
 		scanner.count = -1
 		switch id := src.(type) {
 		case int64:
-			e, err := scanner.kind.Make("", int(id))
+			e, err := scanner.kind.Make(nil, int(id))
 			if err != nil {
 				return err
 			}
@@ -130,20 +139,20 @@ func (scanner *ReferenceScanner) Scan(src interface{}) (err error) {
 	return
 }
 
-type ReferenceType struct {
+type ReferenceConverter struct {
 	References *Kind
 }
 
-func (ref *ReferenceType) SQLType(column Column) string {
+func (ref *ReferenceConverter) SQLType(column Column) string {
 	pg := GetPostgreSQLAdapter()
 	return fmt.Sprintf("\"%s\".\"Reference\"", pg.Schema)
 }
 
-func (ref *ReferenceType) SQLTextOut(column Column) string {
+func (ref *ReferenceConverter) SQLTextOut(column Column) string {
 	return "( __count__, __count__)"
 }
 
-func (ref *ReferenceType) Value(e Persistable, column Column) (values []interface{}, err error) {
+func (ref *ReferenceConverter) Value(e Persistable, column Column) (values []interface{}, err error) {
 	v := reflect.ValueOf(e).Elem()
 	fieldValue := v.FieldByIndex(column.Index)
 	value := fieldValue.Interface()
@@ -161,7 +170,7 @@ func (ref *ReferenceType) Value(e Persistable, column Column) (values []interfac
 	}
 }
 
-func (ref *ReferenceType) SQLTextIn(column Column, alias string, with bool) string {
+func (ref *ReferenceConverter) SQLTextIn(column Column, alias string, with bool) string {
 	if alias != "" {
 		alias = alias + "."
 	}
@@ -173,7 +182,7 @@ func (ref *ReferenceType) SQLTextIn(column Column, alias string, with bool) stri
 	}
 }
 
-func (ref *ReferenceType) Scanners(column Column, scanners []interface{}, values map[string]interface{}) ([]interface{}, error) {
+func (ref *ReferenceConverter) Scanners(column Column, scanners []interface{}, values map[string]interface{}) ([]interface{}, error) {
 	scanner := new(ReferenceScanner)
 	scanner.BaseKind = ref.References
 	scanner.FieldName = column.FieldName
@@ -181,7 +190,7 @@ func (ref *ReferenceType) Scanners(column Column, scanners []interface{}, values
 	return append(scanners, scanner, scanner), nil
 }
 
-func (ref *ReferenceType) SetValue(e Persistable, column Column, value interface{}) error {
+func (ref *ReferenceConverter) SetValue(e Persistable, column Column, value interface{}) error {
 	ev := reflect.ValueOf(e).Elem()
 	fld := ev.FieldByIndex(column.Index)
 

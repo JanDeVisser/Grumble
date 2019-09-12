@@ -30,13 +30,36 @@ func CompareFloats(a, b float64) bool {
 	return math.Abs(a-b) < 0.00001
 }
 
+type Department struct {
+	Key
+	Name        string
+	Description string
+}
+
+func CreateDepartment(parent *Department, name string, description string) (department *Department, err error) {
+	var p *Key
+	if parent != nil {
+		p = parent.AsKey()
+	}
+	e, err := GetKind(&Department{}).New(p)
+	if err != nil {
+		return
+	}
+	department, _ = e.(*Department)
+	department.Name = name
+	department.Description = description
+	err = Put(department)
+	return
+}
+
 type Product struct {
 	Key
-	Name          string  `grumble:"persist=true"`
-	Category      string  `grumble:"persist=true"`
-	Price         float64 `grumble:"persist"`
-	TotalQuantity int
-	TotalAmount   float64
+	Name          string
+	Category      string
+	Price         float64
+	TotalQuantity int     `grumble:"transient"`
+	TotalAmount   float64 `grumble:"transient"`
+	Grade         string  `grumble:"transient"`
 }
 
 func (p *Product) String() string {
@@ -49,9 +72,6 @@ func CreateProduct(name string, category string, price float64) (product *Produc
 		Category: category,
 		Price:    price,
 	}
-	product.Name = name
-	product.Category = category
-	product.Price = price
 	err = Put(product)
 	return
 }
@@ -62,7 +82,7 @@ func (p *Product) AveragePrice() float64 {
 
 type Fruit struct {
 	Product
-	Color string `grumble:"persist"`
+	Color string
 }
 
 func (f *Fruit) String() string {
@@ -84,8 +104,8 @@ func CreateFruit(name string, color string, price float64) (fruit *Fruit, err er
 
 type Sale struct {
 	Key
-	Quantity int      `grumble:"persist"`
-	Product  *Product `grumble:"persist"`
+	Quantity int
+	Product  *Product
 }
 
 func CreateSale(product *Product, quantity int) (sale *Sale, err error) {
@@ -140,7 +160,7 @@ func TestGetKindForKind(t *testing.T) {
 }
 
 func TestCreateKey(t *testing.T) {
-	key, err := CreateKey("", GetKindForKind(PRODUCT_KIND), SAMPLE_ID)
+	key, err := CreateKey(nil, GetKindForKind(PRODUCT_KIND), SAMPLE_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +184,7 @@ func TestEntity_SetKind(t *testing.T) {
 	}
 
 	k := GetKindForKind(PRODUCT_KIND)
-	key, err := CreateKey("", GetKindForKind(PRODUCT_KIND), SAMPLE_ID)
+	key, err := CreateKey(nil, GetKindForKind(PRODUCT_KIND), SAMPLE_ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +202,7 @@ func TestNewEntityNoParent(t *testing.T) {
 	if k == nil {
 		t.Fatal("Can't get Kind")
 	}
-	e, err := k.Make("", SAMPLE_ID)
+	e, err := k.Make(nil, SAMPLE_ID)
 	if err != nil {
 		t.Fatalf("Can't create entity: %s", err)
 	}
@@ -247,7 +267,7 @@ func TestGet_2(t *testing.T) {
 }
 
 func TestGet_ByKey(t *testing.T) {
-	key, err := CreateKey("", GetKindForKind(PRODUCT_KIND), SquashID)
+	key, err := CreateKey(nil, GetKindForKind(PRODUCT_KIND), SquashID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +347,7 @@ func TestMakeQuery_WithDerived(t *testing.T) {
 
 func TestPut_insertReference(t *testing.T) {
 	fruit := &Fruit{}
-	fruit.Initialize("", AppleID)
+	fruit.Initialize(nil, AppleID)
 	SetKind(fruit)
 	sale, err := CreateSale(&fruit.Product, APPLE_SALE_QUANTITY)
 	if err != nil {
@@ -482,14 +502,13 @@ func TestMakeQuery_OuterJoin_NoMatch(t *testing.T) {
 
 func TestMakeQuery_OuterJoin_Aggregate(t *testing.T) {
 	fruit := &Fruit{}
-	fruit.Initialize("", AppleID)
-	SetKind(fruit)
+	Initialize(fruit, nil, AppleID)
 	_, err := CreateSale(&fruit.Product, APPLE_SALE_QUANTITY_2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	squash := &Product{}
-	squash.Initialize("", SquashID)
+	squash.Initialize(nil, SquashID)
 	SetKind(squash)
 	_, err = CreateSale(squash, SQUASH_SALE_QUANTITY)
 	if err != nil {
@@ -530,7 +549,81 @@ func TestMakeQuery_OuterJoin_Aggregate(t *testing.T) {
 		t.Fatalf("Could not cast Persistable to proper Kind '%s'", PRODUCT_KIND)
 	}
 	if product.Category != FRUIT_CAT {
-		t.Fatalf("Referred entity's fields not restored properly: %s != %s", product.Category, FRUIT_CAT)
+		t.Fatalf("Queried entity's fields not restored properly: %s != %s", product.Category, FRUIT_CAT)
 	}
-	t.Log(product.TotalQuantity)
+	if product.TotalQuantity != (APPLE_SALE_QUANTITY + APPLE_SALE_QUANTITY_2) {
+		t.Fatalf("Queried entity's aggregated field not restored properly: %d != %d",
+			product.TotalQuantity, APPLE_SALE_QUANTITY+APPLE_SALE_QUANTITY_2)
+	}
+}
+
+var GroceriesID int
+
+func TestPut_Hierarchy(t *testing.T) {
+	groceries, err := CreateDepartment(nil, "Groceries", "Grocery Store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	GroceriesID = groceries.Id()
+	_, err = CreateDepartment(groceries, "Fruits and Vegetables", "Fruits and Vegetables")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQuery_Hierarchy(t *testing.T) {
+	groceries := &Department{}
+	Initialize(groceries, nil, GroceriesID)
+	q := MakeQuery(groceries)
+	q.WithDerived = true
+	q.HasParent(groceries)
+	results, err := q.Execute()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("No results")
+	}
+	if len(results) != 1 {
+		t.Errorf("Expected 1 results, got %d", len(results))
+	}
+	row := results[0]
+	var department *Department
+	switch e := row[0].(type) {
+	case *Department:
+		department = e
+	default:
+		t.Fatalf("Could not cast Persistable to proper Kind '%s'", groceries.Kind().Kind)
+	}
+	if department.Name != "Fruits and Vegetables" {
+		t.Fatalf("Descendent entity's fields not restored properly: %s != %s",
+			department.Name, "Fruits and Vegetables")
+	}
+}
+
+func TestQuery_Computed(t *testing.T) {
+	q := MakeQuery(&Product{})
+	q.WithDerived = true
+	q.AddComputedColumn(Computed{
+		Formula: "(CASE WHEN \"Price\" > 1 THEN 'Expensive' ELSE 'Cheap' END)",
+		Name:    "Grade",
+	})
+	results, err := q.Execute()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatalf("No results")
+	}
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results, got %d", len(results))
+	}
+	for _, row := range results {
+		switch e := row[0].(type) {
+		case *Fruit:
+			t.Logf("Fruit '%s', Grade '%s'", e.Name, e.Grade)
+		case *Product:
+			t.Logf("Product '%s', Grade '%s'", e.Name, e.Grade)
+		}
+	}
 }

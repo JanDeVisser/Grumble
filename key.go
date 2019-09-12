@@ -11,7 +11,7 @@ import (
 
 type Key struct {
 	kind      *Kind
-	parent    string
+	parent    *Key
 	id        int
 	populated bool
 	synthetic map[string]interface{}
@@ -19,11 +19,13 @@ type Key struct {
 
 // -- F A C T O R Y  M E T H O D S ------------------------------------------
 
-func CreateKey(parent string, kind *Kind, id int) (*Key, error) {
-	if _, err := ParseKey(parent); err != nil {
-		return nil, err
-	}
+var ZeroKey = &Key{parent: nil, kind: nil, id: 0}
+
+func CreateKey(parent *Key, kind *Kind, id int) (*Key, error) {
 	ret := new(Key)
+	if parent == nil {
+		parent = ZeroKey
+	}
 	ret.parent = parent
 	ret.kind = kind
 	ret.id = id
@@ -32,16 +34,19 @@ func CreateKey(parent string, kind *Kind, id int) (*Key, error) {
 
 func ParseKey(key string) (k *Key, err error) {
 	if key == "" {
-		k = &Key{kind: nil, parent: "", id: 0}
+		k = ZeroKey
 		return
 	}
-	var parent string
+	var parent *Key
 	var local string
 	if lastSlash := strings.LastIndex(key, "/"); lastSlash > 0 {
-		parent = key[:lastSlash]
+		parent, err = ParseKey(key[:lastSlash])
+		if err != nil {
+			return
+		}
 		local = key[lastSlash+1:]
 	} else {
-		parent = ""
+		parent = ZeroKey
 		local = key
 	}
 	if strings.Index(local, ":") < 0 {
@@ -63,10 +68,12 @@ func ParseKey(key string) (k *Key, err error) {
 
 // -- P E R S I S T A B L E  I M P L E M E N T A T I O N --------------------
 
-func (key *Key) Initialize(parent string, id int) *Key {
+func (key *Key) Initialize(parent *Key, id int) *Key {
+	if parent == nil {
+		parent = ZeroKey
+	}
 	key.parent = parent
 	key.id = id
-	SetKind(key)
 	return key
 }
 
@@ -85,12 +92,15 @@ func (key *Key) Kind() *Kind {
 }
 
 func (key *Key) Parent() *Key {
-	ret, _ := ParseKey(key.parent)
-	return ret
+	return key.parent
 }
 
-func (key *Key) AsKey() Key {
-	return *key
+func (key *Key) AsKey() *Key {
+	return key
+}
+
+func (key *Key) IsZero() bool {
+	return key.kind == nil
 }
 
 func (key *Key) Id() int {
@@ -128,12 +138,12 @@ func (key *Key) SetPopulated() {
 // -- E N D  I M P L E M E N T A T I O N ------------------------------------
 
 func (key Key) String() string {
-	if key.kind == nil {
+	if key.IsZero() {
 		return ""
 	}
 	local := fmt.Sprintf("%s:%d", key.Kind().Name(), key.id)
 	switch {
-	case key.parent == "":
+	case key.parent.IsZero():
 		return local
 	default:
 		return fmt.Sprintf("%s%s/", key.parent, local)
@@ -167,7 +177,7 @@ func Populate(e Persistable, values map[string]interface{}) (ret Persistable, er
 		column, ok := k.Column(name)
 		switch {
 		case ok && value != nil:
-			if setter, ok := column.ColumnType.(Setter); ok {
+			if setter, ok := column.Converter.(Setter); ok {
 				err = setter.SetValue(e, column, value)
 				if err != nil {
 					return
@@ -210,7 +220,7 @@ func Inflate(e Persistable) (err error) {
 }
 
 var updateEntity = SQLTemplate{Name: "UpdateEntity", SQL: `UPDATE {{.QualifiedTableName}}
-	SET {{range $i, $c := .Columns}}{{if gt $i 0}},{{end}} "{{$c.ColumnName}}" = {{$c.ColumnType.SQLTextOut .}}{{end}}
+	SET {{range $i, $c := .Columns}}{{if gt $i 0}},{{end}} "{{$c.ColumnName}}" = {{$c.Converter.SQLTextOut .}}{{end}}
 	WHERE "_id" = __count__
 `}
 
@@ -228,7 +238,7 @@ func update(e Persistable) (err error) {
 		}
 		values := make([]interface{}, 0)
 		for _, column := range k.Columns {
-			columnValues, err := column.ColumnType.Value(e, column)
+			columnValues, err := column.Converter.Value(e, column)
 			if err != nil {
 				return err
 			}
@@ -246,7 +256,7 @@ func update(e Persistable) (err error) {
 var insertEntity = SQLTemplate{Name: "InsertNewEntity", SQL: `INSERT INTO {{.QualifiedTableName}}
 	( "_parent"{{range $i, $c := .Columns}}, "{{$c.ColumnName}}"{{end}} )
 	VALUES
-	( __count__{{range .Columns}}, {{.ColumnType.SQLTextOut .}}{{end}} )
+	( (__count__, __count__){{range .Columns}}, {{.Converter.SQLTextOut .}}{{end}} )
 	RETURNING "_id"
 `}
 
@@ -260,13 +270,13 @@ func insert(e Persistable) (err error) {
 			return
 		}
 		values := make([]interface{}, 0)
-		ps := ""
-		if p := e.Parent(); p != nil {
-			ps = p.String()
+		if e.Parent().IsZero() {
+			values = append(values, "", 0)
+		} else {
+			values = append(values, e.Parent().Kind().Kind, e.Parent().Id())
 		}
-		values = append(values, ps)
 		for _, column := range k.Columns {
-			columnValues, err := column.ColumnType.Value(e, column)
+			columnValues, err := column.Converter.Value(e, column)
 			if err != nil {
 				return err
 			}
@@ -282,7 +292,7 @@ func insert(e Persistable) (err error) {
 		case err != nil:
 			return
 		}
-		e.Initialize(e.Parent().String(), id)
+		e.Initialize(e.Parent(), id)
 		e.SetPopulated()
 		return
 	})

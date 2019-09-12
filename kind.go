@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -19,7 +18,7 @@ type Column struct {
 	VerboseName string
 	IsKey       bool
 	Scoped      bool
-	ColumnType  ColumnType
+	Converter   Converter
 }
 
 type Kind struct {
@@ -98,8 +97,8 @@ func (k *Kind) ColumnByFieldName(name string) (col Column, ok bool) {
 	return
 }
 
-var RegistryByType map[reflect.Type]*Kind = make(map[reflect.Type]*Kind)
-var RegistryByKind map[string]*Kind = make(map[string]*Kind)
+var RegistryByType = make(map[reflect.Type]*Kind)
+var RegistryByKind = make(map[string]*Kind)
 
 func GetKind(obj Persistable) (kind *Kind) {
 	switch e := obj.(type) {
@@ -120,7 +119,18 @@ func GetKind(obj Persistable) (kind *Kind) {
 func SetKind(e Persistable) *Kind {
 	k := GetKind(e)
 	e.SetKind(k)
+	if e.Parent() == nil {
+		e.Initialize(e.Parent(), e.Id())
+	}
 	return k
+}
+
+func Initialize(e Persistable, parent *Key, id int) Persistable {
+	e.Initialize(parent, id)
+	if e.Kind() == nil {
+		SetKind(e)
+	}
+	return e
 }
 
 func GetKindForType(t reflect.Type) *Kind {
@@ -145,26 +155,14 @@ func GetKindForKind(k string) *Kind {
 	return nil
 }
 
-func ParseTag(tag string) map[string]string {
-	ret := make(map[string]string)
-	tags := strings.Split(tag, ";")
-	for _, t := range tags {
-		t := strings.TrimSpace(t)
-		if t != "" {
-			nameValue := strings.SplitN(t, "=", 2)
-			name := strings.ToLower(strings.TrimSpace(nameValue[0]))
-			if len(nameValue) == 2 {
-				ret[name] = strings.TrimSpace(nameValue[1])
-			} else {
-				ret[name] = "true"
-			}
-		}
-	}
-	return ret
-}
+var persistable reflect.Type = nil
+var typeAdapter reflect.Type = nil
 
 func createKind(t reflect.Type, obj interface{}) *Kind {
-	persistable := reflect.TypeOf((*Persistable)(nil)).Elem()
+	if persistable == nil {
+		persistable = reflect.TypeOf((*Persistable)(nil)).Elem()
+		typeAdapter = reflect.TypeOf((*Adapter)(nil)).Elem()
+	}
 	if !(t.Implements(persistable) || reflect.PtrTo(t).Implements(persistable)) {
 		return nil
 	}
@@ -185,23 +183,22 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 	keyFound := false
 	for i := 0; i < t.NumField(); i++ {
 		fld := t.Field(i)
-		objFld := s.Field(i)
 		r, _ := utf8.DecodeRuneInString(fld.Name)
 		if !unicode.IsUpper(r) {
 			continue
 		}
-		tagString, ok := fld.Tag.Lookup("grumble")
+		tags := ParseTags(fld.Tag.Get("grumble"))
+		if transient, _ := tags.GetBool("transient"); transient {
+			continue
+		}
 		switch {
-		case fld.Type.Kind() == reflect.Struct && fld.Type.Name() == "Key":
-			kind.parseEntityTag(fld.Tag.Get("grumble"))
+		case fld.Type.Kind() == reflect.Struct && (fld.Type.Name() == "Key" || fld.Type.Name() == "grumble/Key"):
 			if kind.base != nil {
-				panic(fmt.Sprintf("Kind '%s' can't embed Entity directly and have a base Kind", kind.Kind))
+				panic(fmt.Sprintf("Kind '%s' can't embed Key directly and have a base Kind", kind.Kind))
 			}
+			kind.parseEntityTags(tags)
 			keyFound = true
-		case fld.Type.Kind() == reflect.Struct && fld.Type.String() == "time/Time":
-			if ok {
-				kind.AddColumn(fld, objFld, ParseTag(tagString))
-			}
+			continue
 		case fld.Type.Kind() == reflect.Struct:
 			structType := fld.Type
 			structKind := GetKindForType(structType)
@@ -212,18 +209,12 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 				if keyFound {
 					panic(fmt.Sprintf("Kind '%s' can't embed Key directly and have a base Kind", kind.Kind))
 				}
-				kind.SetBaseKind(i, fld, structKind)
+				kind.SetBaseKind(i, structKind, tags)
+				continue
 			}
-		case fld.Type.Kind() == reflect.Ptr && fld.Type.Elem().Kind() == reflect.Struct:
-			structType := fld.Type.Elem()
-			structKind := GetKindForType(structType)
-			if structKind != nil && ok {
-				kind.AddColumn(fld, objFld, ParseTag(tagString))
-			}
-		case objFld.CanInterface():
-			if ok {
-				kind.AddColumn(fld, objFld, ParseTag(tagString))
-			}
+		}
+		if converter := kind.GetConverter(fld, tags); converter != nil {
+			kind.CreateColumn(fld, converter, tags)
 		}
 	}
 	if err := kind.reconcile(); err != nil {
@@ -243,8 +234,8 @@ func (k *Kind) addColumn(column Column) {
 	k.columnsByName[column.FieldName] = len(k.Columns) - 1
 }
 
-func (k *Kind) SetBaseKind(index int, field reflect.StructField, base *Kind) {
-	k.parseEntityTag(field.Tag.Get("grumble"))
+func (k *Kind) SetBaseKind(index int, base *Kind, tags *Tags) {
+	k.parseEntityTags(tags)
 	k.base = base
 	k.baseIndex = index
 	base.AddDerivedKind(k)
@@ -290,85 +281,89 @@ func (k *Kind) DerivesFrom(base *Kind) bool {
 	return false
 }
 
-func (k *Kind) parseEntityTag(tagstring string) {
-	tags := ParseTag(tagstring)
-	if v, ok := tags["tablename"]; ok {
-		k.TableName = v
+func (k *Kind) parseEntityTags(tags *Tags) {
+	if tags == nil {
+		return
 	}
-	if v, ok := tags["verbosename"]; ok {
-		k.VerboseName = v
+	if tags.Has("tablename") {
+		k.TableName = tags.Get("tablename")
+	}
+	if tags.Has("verbosename") {
+		k.VerboseName = tags.Get("verbosename")
 	}
 }
 
-func (k *Kind) AddColumn(field reflect.StructField, objFld reflect.Value, tags map[string]string) {
-	ret := Column{}
-	ret.FieldName = field.Name
-	ret.IsKey = false
-	ret.Index = make([]int, 1)
-	ret.Index[0] = field.Index[0]
-	if v, ok := tags["key"]; ok {
-		b, err := strconv.ParseBool(v)
-		if err == nil && b {
-			ret.IsKey = true
-			ret.Scoped = true
-			if v, ok := tags["scoped"]; ok {
-				b, err = strconv.ParseBool(v)
-				if err == nil {
-					ret.Scoped = b
-				}
-			}
-		}
-	}
-	if v, ok := tags["label"]; ok {
-		isLabel, err := strconv.ParseBool(v)
-		if err == nil && isLabel {
-			k.LabelCol = ret.FieldName
-		}
-	}
-	if v, ok := tags["columnname"]; ok {
-		ret.ColumnName = v
-	} else {
-		ret.ColumnName = ret.FieldName
-	}
-	if v, ok := tags["verbosename"]; ok {
-		ret.VerboseName = v
-	} else {
-		ret.VerboseName = string(regexp.MustCompile("([[:lower:]])([[:upper:]])").ReplaceAll(
-			[]byte(strings.ReplaceAll(strings.Title(ret.FieldName), "_", " ")),
-			[]byte("$1 $2")))
-	}
-	ret.Kind = k
-	typ := tags["type"]
+func (k *Kind) GetConverter(field reflect.StructField, tags *Tags) (converter Converter) {
+	taggedType := tags.Get("type")
 	switch {
-	case field.Type.Kind() == reflect.Struct && field.Type.String() == "time/Time":
-		if typ == "" {
-			typ = "timestamp"
-		}
-		ret.ColumnType = &BasicColumnType{typ}
 	case field.Type.Kind() == reflect.Ptr && field.Type.Elem().Kind() == reflect.Struct:
 		structType := field.Type.Elem()
 		structKind := GetKindForType(structType)
 		if structKind != nil {
-			ret.ColumnType = &ReferenceType{References: structKind}
+			converter = &ReferenceConverter{References: structKind}
 		}
-	default:
-		if typ != "" {
-			ret.ColumnType = &BasicColumnType{typ}
+	case field.Type.Implements(typeAdapter):
+		instance := reflect.New(field.Type).Interface()
+		adapt, ok := instance.(Adapter)
+		if ok {
+			converter = adapt.Converter(field, tags)
 		} else {
-			ret.ColumnType = ColumnTypes[objFld.Kind()]
+			panic("?? Cannot cast to Adapter??")
+		}
+	case taggedType != "":
+		converter = &BasicConverter{taggedType}
+	case ConvertersForType[field.Type] != nil:
+		converter = ConvertersForType[field.Type]
+	default:
+		converter = ConvertersForKind[field.Type.Kind()]
+	}
+	return converter
+}
+
+func (k *Kind) CreateColumn(field reflect.StructField, converter Converter, tags *Tags) {
+	column := Column{}
+	column.FieldName = field.Name
+	column.IsKey = false
+	column.Index = make([]int, 1)
+	column.Index[0] = field.Index[0]
+	column.Converter = converter
+	if v, ok := tags.GetBool("key"); ok && v {
+		column.IsKey = true
+		column.Scoped = true
+		if v, ok = tags.GetBool("scoped"); ok {
+			column.Scoped = v
 		}
 	}
-	k.addColumn(ret)
+	if v, ok := tags.GetBool("label"); ok && v {
+		k.LabelCol = column.FieldName
+	}
+	if tags.Has("columnname") {
+		column.ColumnName = tags.Get("columnname")
+	} else {
+		column.ColumnName = column.FieldName
+	}
+	if tags.Has("verbosename") {
+		column.VerboseName = tags.Get("verbosename")
+	} else {
+		column.VerboseName = string(regexp.MustCompile("([[:lower:]])([[:upper:]])").ReplaceAll(
+			[]byte(strings.ReplaceAll(strings.Title(column.FieldName), "_", " ")),
+			[]byte("$1 $2")))
+	}
+	column.Kind = k
+	k.addColumn(column)
 }
 
 var _idColumn = SQLColumn{Name: "_id", SQLType: "serial", Default: "", Nullable: false, PrimaryKey: true, Unique: false, Indexed: false}
-var _parentColumn = SQLColumn{Name: "_parent", SQLType: "text", Default: "", Nullable: true, PrimaryKey: false, Unique: false, Indexed: false}
+var _parentColumn = SQLColumn{Name: "_parent", SQLType: "", Default: "", Nullable: true, PrimaryKey: false, Unique: false, Indexed: false}
 var _parentIndex = SQLIndex{Columns: []string{"_parent", "_id"}, PrimaryKey: false, Unique: true}
 
 func (k *Kind) reconcile() (err error) {
 	table := k.SQLTable()
 	if err = table.AddColumn(_idColumn); err != nil {
 		return
+	}
+	if _parentColumn.SQLType == "" {
+		_parentColumn.SQLType = fmt.Sprintf("%q.\"Reference\"", table.pg.Schema)
 	}
 	if err = table.AddColumn(_parentColumn); err != nil {
 		return
@@ -379,7 +374,7 @@ func (k *Kind) reconcile() (err error) {
 	for _, col := range k.Columns {
 		c := SQLColumn{}
 		c.Name = col.ColumnName
-		c.SQLType = col.ColumnType.SQLType(col)
+		c.SQLType = col.Converter.SQLType(col)
 		if err = table.AddColumn(c); err != nil {
 			return
 		}
@@ -401,7 +396,7 @@ func (k *Kind) reconcile() (err error) {
 	return
 }
 
-func (k *Kind) MakeValue(parent string, id int) (value reflect.Value, entity Persistable, err error) {
+func (k *Kind) MakeValue(parent *Key, id int) (value reflect.Value, entity Persistable, err error) {
 	value = reflect.New(k.Type())
 	entity, ok := value.Interface().(Persistable)
 	if !ok {
@@ -413,17 +408,17 @@ func (k *Kind) MakeValue(parent string, id int) (value reflect.Value, entity Per
 	return
 }
 
-func (k *Kind) Make(parent string, id int) (entity Persistable, err error) {
+func (k *Kind) Make(parent *Key, id int) (entity Persistable, err error) {
 	_, entity, err = k.MakeValue(parent, id)
 	return
 }
 
 func (k *Kind) New(parent *Key) (entity Persistable, err error) {
-	return k.Make(parent.String(), 0)
+	return k.Make(parent, 0)
 }
 
 func (k *Kind) Copy(src, target Persistable) (ret Persistable, err error) {
-	target.Initialize(src.Parent().String(), src.Id())
+	target.Initialize(src.Parent(), src.Id())
 	sourceValue := reflect.ValueOf(src).Elem()
 	targetValue := reflect.ValueOf(target).Elem()
 	for _, column := range k.Columns {
