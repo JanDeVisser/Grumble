@@ -55,6 +55,8 @@ func (scanner *BasicScanner) Scan(value interface{}) (err error) {
 	return
 }
 
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
 type BasicConverter struct {
 	sqlType string
 }
@@ -92,52 +94,32 @@ type Setter interface {
 // -- R E F E R E N C E S ---------------------------------------------------
 
 type ReferenceScanner struct {
+	KeyScanner
 	FieldName   string
 	FieldValues map[string]interface{}
-	BaseKind    *Kind
-	kind        *Kind
-	count       int
 }
 
 func (scanner *ReferenceScanner) Scan(src interface{}) (err error) {
-	switch scanner.count {
-	case 0:
-		scanner.kind = nil
-		switch k := src.(type) {
-		case string:
-			kind := GetKindForKind(k)
-			switch {
-			case kind == nil:
-				err = errors.New(fmt.Sprintf("unknown kind '%s'", k))
-			case !kind.DerivesFrom(scanner.BaseKind):
-				err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'",
-					k, scanner.BaseKind.Kind))
-			default:
-				scanner.kind = kind
-			}
-		case nil:
-			scanner.kind = nil
-		default:
-			err = errors.New(fmt.Sprintf("ReferenceScanner expected string kind, not '%q', (%T)", src, src))
+	err = scanner.KeyScanner.Scan(src)
+	if err != nil {
+		return
+	}
+	var e Persistable
+	if scanner.Key.Kind() != nil {
+		e, err = scanner.Key.Kind().Make(nil, scanner.Key.Id())
+		if err != nil {
+			return err
 		}
-	case 1:
-		scanner.count = -1
-		switch id := src.(type) {
-		case int64:
-			e, err := scanner.kind.Make(nil, int(id))
-			if err != nil {
-				return err
-			}
-			scanner.FieldValues[scanner.FieldName] = e
-		case nil:
-			scanner.FieldValues[scanner.FieldName] = nil
-		default:
-			err = errors.New(fmt.Sprintf("ReferenceScanner expected string kind, not '%q', (%T)", src, src))
+		e, err = Get(e, scanner.Key.Id())
+		if err != nil {
+			return err
 		}
 	}
-	scanner.count++
+	scanner.FieldValues[scanner.FieldName] = e
 	return
 }
+
+// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 type ReferenceConverter struct {
 	References *Kind
@@ -149,45 +131,44 @@ func (ref *ReferenceConverter) SQLType(column Column) string {
 }
 
 func (ref *ReferenceConverter) SQLTextOut(column Column) string {
-	return "( __count__, __count__)"
+	return "__count__"
 }
 
 func (ref *ReferenceConverter) Value(e Persistable, column Column) (values []interface{}, err error) {
 	v := reflect.ValueOf(e).Elem()
 	fieldValue := v.FieldByIndex(column.Index)
-	value := fieldValue.Interface()
-	if reference, ok := value.(Persistable); ok {
-		kind := reference.Kind()
-		if !kind.DerivesFrom(ref.References) {
-			err = errors.New(fmt.Sprintf("Kind '%s' does not derive from '%s'", kind.Kind, ref.References.Kind))
+	if !fieldValue.IsNil() {
+		value := fieldValue.Interface()
+		if reference, ok := value.(Persistable); ok {
+			kind := reference.Kind()
+			if !kind.DerivesFrom(ref.References) {
+				err = errors.New(fmt.Sprintf("Kind '%s' does not derive from '%s'", kind.Kind, ref.References.Kind))
+				return
+			}
+			values = []interface{}{reference.AsKey().String()}
+		} else {
+			err = errors.New(fmt.Sprintf("column '%s' value is not a Persistable", column.FieldName))
 			return
 		}
-		values = []interface{}{kind.Kind, reference.Id()}
-		return
 	} else {
-		err = errors.New(fmt.Sprintf("column '%s' value is not a Persistable", column.FieldName))
-		return
+		values = []interface{}{ZeroKey.String()}
 	}
+	return
 }
 
 func (ref *ReferenceConverter) SQLTextIn(column Column, alias string, with bool) string {
 	if alias != "" {
 		alias = alias + "."
 	}
-	if with {
-		return fmt.Sprintf("(%s\"%s\").kind \"%sKind\", (%s\"%s\").id \"%sId\"",
-			alias, column.ColumnName, column.ColumnName, alias, column.ColumnName, column.ColumnName)
-	} else {
-		return fmt.Sprintf("%s\"%sKind\", %s\"%sId\"", alias, column.ColumnName, alias, column.ColumnName)
-	}
+	return fmt.Sprintf("%s%q", alias, column.ColumnName)
 }
 
 func (ref *ReferenceConverter) Scanners(column Column, scanners []interface{}, values map[string]interface{}) ([]interface{}, error) {
 	scanner := new(ReferenceScanner)
-	scanner.BaseKind = ref.References
+	scanner.Expects = ref.References
 	scanner.FieldName = column.FieldName
 	scanner.FieldValues = values
-	return append(scanners, scanner, scanner), nil
+	return append(scanners, scanner), nil
 }
 
 func (ref *ReferenceConverter) SetValue(e Persistable, column Column, value interface{}) error {

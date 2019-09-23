@@ -7,24 +7,25 @@ import (
 	"testing"
 )
 
-const PRODUCT_KIND = "github.com.jandevisser.grumble.product"
-const FRUIT_KIND = "github.com.jandevisser.grumble.fruit"
-const SALE_KIND = "github.com.jandevisser.grumble.sale"
-const SAMPLE_ID = 42
+const ProductKind = "github.com.jandevisser.grumble.product"
+const FruitKind = "github.com.jandevisser.grumble.fruit"
+const SaleKind = "github.com.jandevisser.grumble.sale"
+const SampleId = 42
 
-const VEGETABLE_CAT = "Vegetable"
-const FRUIT_CAT = "Fruit"
+const VegetableCat = "Vegetable"
+const FruitCat = "Fruit"
 
-const SQUASH = "Squash"
-const SQUASH_PRICE = 1.25
-const SQUASH_PRICE_NEW = SQUASH_PRICE * 1.05
-const APPLE = "Apple"
-const APPLE_PRICE = 0.69
-const APPLE_COLOR = "Red"
+const Squash = "Squash"
+const SquashPrice = 1.25
+const SquashPriceNew = SquashPrice * 1.05
+const Apple = "Apple"
+const ApplePrice = 0.69
+const AppleColor = "Red"
 
-const SQUASH_SALE_QUANTITY = 3
-const APPLE_SALE_QUANTITY = 12
-const APPLE_SALE_QUANTITY_2 = 13
+const SquashSaleQuantity = 3
+const AppleSaleQuantity = 12
+const AppleSaleQuantity2 = 13
+const NilSaleQuantity = 0
 
 func CompareFloats(a, b float64) bool {
 	return math.Abs(a-b) < 0.00001
@@ -93,7 +94,7 @@ func CreateFruit(name string, color string, price float64) (fruit *Fruit, err er
 	fruit = &Fruit{
 		Product: Product{
 			Name:     name,
-			Category: FRUIT_CAT,
+			Category: FruitCat,
 			Price:    price,
 		},
 		Color: color,
@@ -123,68 +124,68 @@ var AppleID int
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 func TestGetKindForType(t *testing.T) {
-	k := GetKindForType(reflect.TypeOf(Product{}))
+	k := GetKind(reflect.TypeOf(Product{}))
 	if k == nil {
 		t.Fatal("Could not get kind for Product")
 	}
-	if k.Name() != PRODUCT_KIND {
-		t.Errorf("Name '%s' != '%s'", k.Name(), PRODUCT_KIND)
+	if k.Name() != ProductKind {
+		t.Errorf("Name '%s' != '%s'", k.Name(), ProductKind)
 	}
 }
 
 func TestGetKindForType_Subclass(t *testing.T) {
-	k := GetKindForType(reflect.TypeOf(Fruit{}))
+	k := GetKind(reflect.TypeOf(Fruit{}))
 	if k == nil {
 		t.Fatal("Could not get kind for Fruit")
 	}
-	if k.Name() != FRUIT_KIND {
-		t.Errorf("Name '%s' != '%s'", k.Name(), FRUIT_KIND)
+	if k.Name() != FruitKind {
+		t.Errorf("Name '%s' != '%s'", k.Name(), FruitKind)
 	}
 }
 
 func TestGetKindForType_Reference(t *testing.T) {
-	k := GetKindForType(reflect.TypeOf(Sale{}))
+	k := GetKind(reflect.TypeOf(Sale{}))
 	if k == nil {
 		t.Fatal("Could not get kind for Sale")
 	}
 }
 
 func TestGetKindForKind(t *testing.T) {
-	k := GetKindForKind(PRODUCT_KIND)
+	k := GetKind(ProductKind)
 	if k == nil {
 		t.Fatal("Can't get Kind")
 	}
-	if k.Name() != PRODUCT_KIND {
-		t.Errorf("Name '%s' != '%s'", k.Name(), PRODUCT_KIND)
+	if k.Name() != ProductKind {
+		t.Errorf("Name '%s' != '%s'", k.Name(), ProductKind)
 	}
 }
 
 func TestCreateKey(t *testing.T) {
-	key, err := CreateKey(nil, GetKindForKind(PRODUCT_KIND), SAMPLE_ID)
+	key, err := CreateKey(nil, GetKind(ProductKind), SampleId)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id := key.Id()
-	if id != SAMPLE_ID {
-		t.Errorf("Name '%d' != '%d'", id, SAMPLE_ID)
+	if id != SampleId {
+		t.Errorf("Name '%d' != '%d'", id, SampleId)
 	}
 }
 
 func TestEntity_SetKind(t *testing.T) {
 	product := Product{}
 	SetKind(&product)
-	if product.Kind().Kind != PRODUCT_KIND {
-		t.Fatalf("Kind name '%s' != '%s'", product.Kind().Kind, PRODUCT_KIND)
+	if product.Kind().Kind != ProductKind {
+		t.Fatalf("Kind name '%s' != '%s'", product.Kind().Kind, ProductKind)
 	}
 
 	productPtr := &Product{}
 	SetKind(productPtr)
-	if productPtr.Kind().Kind != PRODUCT_KIND {
-		t.Fatalf("Kind name '%s' != '%s' [Pointer]", productPtr.Kind().Kind, PRODUCT_KIND)
+	if productPtr.Kind().Kind != ProductKind {
+		t.Fatalf("Kind name '%s' != '%s' [Pointer]", productPtr.Kind().Kind, ProductKind)
 	}
 
-	k := GetKindForKind(PRODUCT_KIND)
-	key, err := CreateKey(nil, GetKindForKind(PRODUCT_KIND), SAMPLE_ID)
+	k := GetKind(ProductKind)
+	key, err := CreateKey(nil, GetKind(ProductKind), SampleId)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,17 +193,17 @@ func TestEntity_SetKind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persistable.Kind().Kind != PRODUCT_KIND {
-		t.Fatalf("Kind name '%s' != '%s' [k.New]", persistable.Kind().Kind, PRODUCT_KIND)
+	if persistable.Kind().Kind != ProductKind {
+		t.Fatalf("Kind name '%s' != '%s' [k.New]", persistable.Kind().Kind, ProductKind)
 	}
 }
 
 func TestNewEntityNoParent(t *testing.T) {
-	k := GetKindForKind(PRODUCT_KIND)
+	k := GetKind(ProductKind)
 	if k == nil {
 		t.Fatal("Can't get Kind")
 	}
-	e, err := k.Make(nil, SAMPLE_ID)
+	e, err := k.Make(nil, SampleId)
 	if err != nil {
 		t.Fatalf("Can't create entity: %s", err)
 	}
@@ -210,8 +211,8 @@ func TestNewEntityNoParent(t *testing.T) {
 	if !ok {
 		t.Fatal("Could not cast created Entity to Product")
 	}
-	if id := product.Id(); id != SAMPLE_ID {
-		t.Fatalf("Product Id() '%d' != '%d'", id, SAMPLE_ID)
+	if id := product.Id(); id != SampleId {
+		t.Fatalf("Product Id() '%d' != '%d'", id, SampleId)
 	}
 	if !CompareFloats(product.AveragePrice(), math.Pi) {
 		t.Fatal("product.AveragePrice failed")
@@ -220,9 +221,9 @@ func TestNewEntityNoParent(t *testing.T) {
 
 func TestPut_insert(t *testing.T) {
 	product := &Product{}
-	product.Name = SQUASH
-	product.Category = VEGETABLE_CAT
-	product.Price = SQUASH_PRICE
+	product.Name = Squash
+	product.Category = VegetableCat
+	product.Price = SquashPrice
 	if err := Put(product); err != nil {
 		t.Fatalf("Could not persist product entity: %s", err)
 	}
@@ -235,11 +236,11 @@ func TestGet_1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Could not Get(%d): %s", SquashID, err)
 	}
-	if squash.Kind().Kind != PRODUCT_KIND {
-		t.Errorf("Entity does not have proper Kind after Get: '%s' != '%s'", squash.Kind().Kind, PRODUCT_KIND)
+	if squash.Kind().Kind != ProductKind {
+		t.Errorf("Entity does not have proper Kind after Get: '%s' != '%s'", squash.Kind().Kind, ProductKind)
 	}
-	if !CompareFloats(squash.Price, SQUASH_PRICE) {
-		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SQUASH_PRICE)
+	if !CompareFloats(squash.Price, SquashPrice) {
+		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SquashPrice)
 	}
 }
 
@@ -249,7 +250,7 @@ func TestPut_update(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Could not Get(%d): %s", SquashID, err)
 	}
-	squash.Price = SQUASH_PRICE_NEW
+	squash.Price = SquashPriceNew
 	if err := Put(squash); err != nil {
 		t.Fatalf("Could not persist squash entity: %s", err)
 	}
@@ -261,13 +262,13 @@ func TestGet_2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Could not Get(%d): %s", SquashID, err)
 	}
-	if !CompareFloats(squash.Price, SQUASH_PRICE_NEW) {
-		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SQUASH_PRICE_NEW)
+	if !CompareFloats(squash.Price, SquashPriceNew) {
+		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SquashPriceNew)
 	}
 }
 
 func TestGet_ByKey(t *testing.T) {
-	key, err := CreateKey(nil, GetKindForKind(PRODUCT_KIND), SquashID)
+	key, err := CreateKey(nil, GetKind(ProductKind), SquashID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,8 +281,8 @@ func TestGet_ByKey(t *testing.T) {
 	if !ok {
 		t.Fatalf("Could not cast Persistable returned by Get() by key")
 	}
-	if !CompareFloats(squash.Price, SQUASH_PRICE_NEW) {
-		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SQUASH_PRICE_NEW)
+	if !CompareFloats(squash.Price, SquashPriceNew) {
+		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SquashPriceNew)
 	}
 }
 
@@ -304,13 +305,13 @@ func TestMakeQuery(t *testing.T) {
 	if !ok {
 		t.Fatalf("Could not cast Persistable returned by Get() by key")
 	}
-	if !CompareFloats(squash.Price, SQUASH_PRICE_NEW) {
-		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SQUASH_PRICE_NEW)
+	if !CompareFloats(squash.Price, SquashPriceNew) {
+		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SquashPriceNew)
 	}
 }
 
 func TestPut_insertDerived(t *testing.T) {
-	fruit, err := CreateFruit(APPLE, APPLE_COLOR, APPLE_PRICE)
+	fruit, err := CreateFruit(Apple, AppleColor, ApplePrice)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +324,7 @@ func TestPut_insertDerived(t *testing.T) {
 func TestMakeQuery_WithDerived(t *testing.T) {
 	q := MakeQuery(&Product{})
 	q.WithDerived = true
-	q.AddFilter("Category", FRUIT_CAT)
+	q.AddFilter("Category", FruitCat)
 	results, err := q.Execute()
 	if err != nil {
 		t.Fatal(err)
@@ -339,9 +340,9 @@ func TestMakeQuery_WithDerived(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected a Fruit, got a '%s'", row[0].Kind().Kind)
 	}
-	if !CompareFloats(fruit.Price, APPLE_PRICE) || fruit.Category != FRUIT_CAT {
+	if !CompareFloats(fruit.Price, ApplePrice) || fruit.Category != FruitCat {
 		t.Fatalf("Entity's fields not restored properly: %f != %f, %s != %s",
-			fruit.Price, APPLE_PRICE, fruit.Category, FRUIT_CAT)
+			fruit.Price, ApplePrice, fruit.Category, FruitCat)
 	}
 }
 
@@ -349,7 +350,17 @@ func TestPut_insertReference(t *testing.T) {
 	fruit := &Fruit{}
 	fruit.Initialize(nil, AppleID)
 	SetKind(fruit)
-	sale, err := CreateSale(&fruit.Product, APPLE_SALE_QUANTITY)
+	sale, err := CreateSale(&fruit.Product, AppleSaleQuantity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Put(sale); err != nil {
+		t.Fatalf("Could not persist Sale entity: %s", err)
+	}
+}
+
+func TestPut_insertNilReference(t *testing.T) {
+	sale, err := CreateSale(nil, NilSaleQuantity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +372,7 @@ func TestPut_insertReference(t *testing.T) {
 func TestMakeQuery_WithReference(t *testing.T) {
 	q := MakeQuery(&Sale{})
 	q.WithDerived = true
-	q.AddFilter("Quantity", APPLE_SALE_QUANTITY)
+	q.AddFilter("Quantity", AppleSaleQuantity)
 	results, err := q.Execute()
 	if err != nil {
 		t.Fatal(err)
@@ -377,9 +388,9 @@ func TestMakeQuery_WithReference(t *testing.T) {
 	if !ok {
 		t.Fatalf("Could not cast Persistable to proper Kind")
 	}
-	if sale.Quantity != APPLE_SALE_QUANTITY {
+	if sale.Quantity != AppleSaleQuantity {
 		t.Fatalf("Entity's fields not restored properly: %d != %d",
-			sale.Quantity, APPLE_SALE_QUANTITY)
+			sale.Quantity, AppleSaleQuantity)
 	}
 	product, err := Get(sale.Product, sale.Product.Id())
 	if err != nil {
@@ -389,16 +400,16 @@ func TestMakeQuery_WithReference(t *testing.T) {
 	if !ok {
 		t.Fatal("Product reference is not a Fruit")
 	}
-	if fruit.Category != FRUIT_CAT {
-		t.Fatalf("Referred entity's fields not restored properly: %s != %s", fruit.Category, FRUIT_CAT)
+	if fruit.Category != FruitCat {
+		t.Fatalf("Referred entity's fields not restored properly: %s != %s", fruit.Category, FruitCat)
 	}
 }
 
 func TestMakeQuery_WithJoin(t *testing.T) {
 	q := MakeQuery(&Sale{})
 	q.WithDerived = true
-	q.AddFilter("Quantity", APPLE_SALE_QUANTITY)
-	join := Join{QueryTable: QueryTable{Kind: GetKindForKind(PRODUCT_KIND), WithDerived: true}, FieldName: "Product"}
+	q.AddFilter("Quantity", AppleSaleQuantity)
+	join := Join{QueryTable: QueryTable{Kind: GetKind(ProductKind), WithDerived: true}, FieldName: "Product"}
 	q.AddJoin(join)
 	results, err := q.Execute()
 	if err != nil {
@@ -413,29 +424,29 @@ func TestMakeQuery_WithJoin(t *testing.T) {
 	row := results[0]
 	sale, ok := row[0].(*Sale)
 	if !ok {
-		t.Fatalf("Could not cast Persistable to proper Kind '%s'", SALE_KIND)
+		t.Fatalf("Could not cast Persistable to proper Kind '%s'", SaleKind)
 	}
-	if sale.Quantity != APPLE_SALE_QUANTITY {
+	if sale.Quantity != AppleSaleQuantity {
 		t.Fatalf("Entity's fields not restored properly: %d != %d",
-			sale.Quantity, APPLE_SALE_QUANTITY)
+			sale.Quantity, AppleSaleQuantity)
 	}
 	product, ok := row[1].(*Fruit)
 	if !ok {
-		t.Fatalf("Could not cast Persistable to proper Kind '%s'", FRUIT_KIND)
+		t.Fatalf("Could not cast Persistable to proper Kind '%s'", FruitKind)
 	}
 	if product.Id() != sale.Product.Id() {
 		t.Fatalf("Joined in entity and reference field have different IDs: %d != %d",
 			product.Id(), sale.Product.Id())
 	}
-	if product.Category != FRUIT_CAT {
-		t.Fatalf("Referred entity's fields not restored properly: %s != %s", product.Category, FRUIT_CAT)
+	if product.Category != FruitCat {
+		t.Fatalf("Referred entity's fields not restored properly: %s != %s", product.Category, FruitCat)
 	}
 }
 
 func TestMakeQuery_OuterJoin(t *testing.T) {
 	q := MakeQuery(&Product{})
 	q.WithDerived = true
-	q.AddFilter("Category", FRUIT_CAT)
+	q.AddFilter("Category", FruitCat)
 	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", JoinType: Outer}
 	q.AddJoin(join)
 	results, err := q.Execute()
@@ -451,29 +462,29 @@ func TestMakeQuery_OuterJoin(t *testing.T) {
 	row := results[0]
 	product, ok := row[0].(*Fruit)
 	if !ok {
-		t.Fatalf("Could not cast Persistable to proper Kind '%s'", FRUIT_KIND)
+		t.Fatalf("Could not cast Persistable to proper Kind '%s'", FruitKind)
 	}
-	if product.Category != FRUIT_CAT {
-		t.Fatalf("Referred entity's fields not restored properly: %s != %s", product.Category, FRUIT_CAT)
+	if product.Category != FruitCat {
+		t.Fatalf("Referred entity's fields not restored properly: %s != %s", product.Category, FruitCat)
 	}
 	sale, ok := row[1].(*Sale)
 	if !ok {
-		t.Fatalf("Could not cast Persistable to proper Kind '%s'", SALE_KIND)
+		t.Fatalf("Could not cast Persistable to proper Kind '%s'", SaleKind)
 	}
 	if product.Id() != sale.Product.Id() {
 		t.Fatalf("Joined in entity and reference field have different IDs: %d != %d",
 			product.Id(), sale.Product.Id())
 	}
-	if sale.Quantity != APPLE_SALE_QUANTITY {
+	if sale.Quantity != AppleSaleQuantity {
 		t.Fatalf("Entity's fields not restored properly: %d != %d",
-			sale.Quantity, APPLE_SALE_QUANTITY)
+			sale.Quantity, AppleSaleQuantity)
 	}
 }
 
 func TestMakeQuery_OuterJoin_NoMatch(t *testing.T) {
 	q := MakeQuery(&Product{})
 	q.WithDerived = true
-	q.AddFilter("Category", VEGETABLE_CAT)
+	q.AddFilter("Category", VegetableCat)
 	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", JoinType: Outer}
 	q.AddJoin(join)
 	results, err := q.Execute()
@@ -489,10 +500,10 @@ func TestMakeQuery_OuterJoin_NoMatch(t *testing.T) {
 	row := results[0]
 	product, ok := row[0].(*Product)
 	if !ok {
-		t.Fatalf("Could not cast Persistable to proper Kind '%s'", PRODUCT_KIND)
+		t.Fatalf("Could not cast Persistable to proper Kind '%s'", ProductKind)
 	}
-	if product.Category != VEGETABLE_CAT {
-		t.Fatalf("Referred entity's fields not restored properly: %s != %s", product.Category, VEGETABLE_CAT)
+	if product.Category != VegetableCat {
+		t.Fatalf("Referred entity's fields not restored properly: %s != %s", product.Category, VegetableCat)
 	}
 	sale := row[1]
 	if sale.Kind() != nil {
@@ -503,21 +514,21 @@ func TestMakeQuery_OuterJoin_NoMatch(t *testing.T) {
 func TestMakeQuery_OuterJoin_Aggregate(t *testing.T) {
 	fruit := &Fruit{}
 	Initialize(fruit, nil, AppleID)
-	_, err := CreateSale(&fruit.Product, APPLE_SALE_QUANTITY_2)
+	_, err := CreateSale(&fruit.Product, AppleSaleQuantity2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	squash := &Product{}
 	squash.Initialize(nil, SquashID)
 	SetKind(squash)
-	_, err = CreateSale(squash, SQUASH_SALE_QUANTITY)
+	_, err = CreateSale(squash, SquashSaleQuantity)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	q := MakeQuery(&Product{})
 	q.WithDerived = true
-	q.AddFilter("Category", FRUIT_CAT)
+	q.AddFilter("Category", FruitCat)
 	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", JoinType: Outer}
 	join.AddAggregate(Aggregate{
 		Function: "SUM",
@@ -546,14 +557,14 @@ func TestMakeQuery_OuterJoin_Aggregate(t *testing.T) {
 	case *Fruit:
 		product = &e.Product
 	default:
-		t.Fatalf("Could not cast Persistable to proper Kind '%s'", PRODUCT_KIND)
+		t.Fatalf("Could not cast Persistable to proper Kind '%s'", ProductKind)
 	}
-	if product.Category != FRUIT_CAT {
-		t.Fatalf("Queried entity's fields not restored properly: %s != %s", product.Category, FRUIT_CAT)
+	if product.Category != FruitCat {
+		t.Fatalf("Queried entity's fields not restored properly: %s != %s", product.Category, FruitCat)
 	}
-	if product.TotalQuantity != (APPLE_SALE_QUANTITY + APPLE_SALE_QUANTITY_2) {
+	if product.TotalQuantity != (AppleSaleQuantity + AppleSaleQuantity2) {
 		t.Fatalf("Queried entity's aggregated field not restored properly: %d != %d",
-			product.TotalQuantity, APPLE_SALE_QUANTITY+APPLE_SALE_QUANTITY_2)
+			product.TotalQuantity, AppleSaleQuantity+AppleSaleQuantity2)
 	}
 }
 

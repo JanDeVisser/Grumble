@@ -5,133 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 )
-
-// --------------------------------------------------------------------------
-
-type Condition interface {
-	WhereClause(string) string
-	Values([]interface{}) []interface{}
-}
-
-// --------------------------------------------------------------------------
-
-type SimpleCondition struct {
-	SQL             string
-	ParameterValues []interface{}
-}
-
-func (cond SimpleCondition) WhereClause(alias string) string {
-	return cond.SQL
-}
-
-func (cond SimpleCondition) Values(values []interface{}) []interface{} {
-	return append(values, cond.ParameterValues...)
-}
-
-// --------------------------------------------------------------------------
-
-type Predicate struct {
-	Expression string
-	Operator   string
-	Value      interface{}
-}
-
-func (cond Predicate) WhereClause(alias string) string {
-	return fmt.Sprintf("%s %s __count__",
-		strings.ReplaceAll(cond.Expression, "__alias__", alias), cond.Operator)
-}
-
-func (cond Predicate) Values(values []interface{}) []interface{} {
-	return append(values, cond.Value)
-}
-
-// --------------------------------------------------------------------------
-
-type HasId struct {
-	Id int
-}
-
-func (cond HasId) WhereClause(alias string) string {
-	return fmt.Sprintf("%s.\"_id\" = __count__", alias)
-}
-
-func (cond HasId) Values(values []interface{}) []interface{} {
-	return append(values, cond.Id)
-}
-
-// --------------------------------------------------------------------------
-
-type HasParent struct {
-	Parent *Key
-}
-
-func (cond HasParent) WhereClause(alias string) string {
-	return fmt.Sprintf("(%s.\"ParentKind\" = __count__ AND %s.\"ParentId\" = __count__)", alias, alias)
-}
-
-func (cond HasParent) Values(values []interface{}) []interface{} {
-	if cond.Parent == nil {
-		cond.Parent = ZeroKey
-	}
-	k := ""
-	if !cond.Parent.IsZero() {
-		k = cond.Parent.Kind().Kind
-	}
-	return append(values, k, cond.Parent.Id())
-}
-
-// --------------------------------------------------------------------------
-
-type HasAncestor struct {
-	Ancestor *Key
-}
-
-func (cond HasAncestor) WhereClause(alias string) string {
-	return fmt.Sprintf("%s.\"_parent\" LIKE __count__", alias)
-}
-
-func (cond HasAncestor) Values(values []interface{}) []interface{} {
-	s := ""
-	if cond.Ancestor != nil {
-		s = cond.Ancestor.String()
-	}
-	return append(values, []interface{}{s + "%"})
-}
-
-// --------------------------------------------------------------------------
-
-type CompoundCondition struct {
-	Conditions []Condition
-}
-
-func (compound *CompoundCondition) AddCondition(cond Condition) Condition {
-	if compound.Conditions == nil {
-		compound.Conditions = make([]Condition, 0)
-	}
-	compound.Conditions = append(compound.Conditions, cond)
-	return compound
-}
-
-func (compound CompoundCondition) WhereClause(alias string) string {
-	conditions := make([]string, len(compound.Conditions))
-	for ix, c := range compound.Conditions {
-		conditions[ix] = "(" + c.WhereClause(alias) + ")"
-	}
-	return strings.Join(conditions, " AND ")
-}
-
-func (compound CompoundCondition) Values(values []interface{}) []interface{} {
-	for _, c := range compound.Conditions {
-		values = c.Values(values)
-	}
-	return values
-}
-
-func (compound CompoundCondition) Size() int {
-	return len(compound.Conditions)
-}
 
 // --------------------------------------------------------------------------
 
@@ -187,7 +61,12 @@ func (table *QueryTable) AddAggregate(agg Aggregate) *QueryTable {
 		panic("Cannot have aggregates on a grouped Kind")
 	}
 	if _, ok := table.Kind.ColumnByFieldName(agg.Column); !ok && agg.Column != "*" {
-		panic(fmt.Sprintf("No column with field name '%s' found", agg.Column))
+		for _, computed := range table.Computed {
+			ok = ok || computed.Name == agg.Column
+		}
+		if !ok {
+			panic(fmt.Sprintf("No column with field name '%s' found", agg.Column))
+		}
 	}
 	agg.Query = table.Query
 	if table.Aggregates == nil {
@@ -258,29 +137,38 @@ type Join struct {
 	FieldName string
 }
 
+func (join Join) IsInnerJoin() bool {
+	return join.JoinType == Inner || join.JoinType == Cross
+}
+
 func (join Join) JoinClause() string {
 	if join.JoinType == "" {
 		join.JoinType = Inner
 	}
 	clause := ""
-	if join.FieldName != "" {
-		if join.JoinType == "INNER" || join.JoinType == "CROSS" {
-			column, ok := join.Query.Kind.ColumnByFieldName(join.FieldName)
-			if ok {
-				clause = fmt.Sprintf("%s JOIN %s ON (%s.\"_id\" = %s.\"%sId\" AND %s.\"_kind\" = %s.\"%sKind\")",
-					join.JoinType, join.Alias,
-					join.Alias, join.Query.Alias, column.ColumnName,
-					join.Alias, join.Query.Alias, column.ColumnName)
-			}
+	var ok = join.FieldName == "_parent"
+	var column = "\"_parent\"[1]"
+	if !ok {
+		var c Column
+		if join.IsInnerJoin() {
+			c, ok = join.Query.Kind.ColumnByFieldName(join.FieldName)
 		} else {
-			column, ok := join.Kind.ColumnByFieldName(join.FieldName)
-			if ok {
-				clause = fmt.Sprintf("%s JOIN %s ON (%s.\"_id\" = %s.\"%sId\" AND %s.\"_kind\" = %s.\"%sKind\")",
-					join.JoinType, join.Alias,
-					join.Query.Alias, join.Alias, column.ColumnName,
-					join.Query.Alias, join.Alias, column.ColumnName)
-			}
+			c, ok = join.Kind.ColumnByFieldName(join.FieldName)
 		}
+		if !ok {
+			panic(fmt.Sprintf("Invalid column '%s' in join", join.FieldName))
+		}
+		column = c.ColumnName
+	}
+	if join.FieldName != "" {
+		alias1 := join.Alias
+		alias2 := join.Query.Alias
+		if !join.IsInnerJoin() {
+			alias1 = join.Query.Alias
+			alias2 = join.Alias
+		}
+		clause = fmt.Sprintf("%s JOIN %s ON ( (%s.\"_kind\", %s.\"_id\") = %s.%q)",
+			join.JoinType, join.Alias, alias1, alias1, alias2, column)
 	}
 	if clause == "" {
 		panic("Could not render join clause")
@@ -291,26 +179,15 @@ func (join Join) JoinClause() string {
 // --------------------------------------------------------------------------
 
 type Query struct {
+	pg *PostgreSQLAdapter
 	QueryTable
 	Joins []Join
 }
 
 func MakeQuery(obj interface{}) *Query {
-	var kind *Kind
-	switch e := obj.(type) {
-	case *Key:
-		kind = e.kind
-	case Key:
-		kind = e.kind
-	case Persistable:
-		if e.Kind() == nil {
-			SetKind(e)
-		}
-		kind = e.Kind()
-	case *Kind:
-		kind = e
-	case Kind:
-		kind = &e
+	kind := GetKind(obj)
+	if kind == nil {
+		panic(fmt.Sprintf("Cannot create query for '%v'", obj))
 	}
 	query := new(Query)
 	query.Kind = kind
@@ -379,13 +256,13 @@ func (query *Query) IsGrouped() bool {
 var querySQL = SQLTemplate{Name: "Query", SQL: `
 WITH 
 	{{.Alias}} AS (
-		SELECT '{{.Kind.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+		SELECT '{{.Kind.Kind}}' "_kind", "_parent", "_id"
 				{{range .Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
 				{{range .Computed}}, {{.SQLFormula}}{{end}} 
 			FROM {{.Kind.QualifiedTableName}}
 		{{if .WithDerived}}{{range .Kind.DerivedKinds}}
 		UNION ALL
-		SELECT '{{.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+		SELECT '{{.Kind}}' "_kind", "_parent", "_id"
  				{{range $.Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
 				{{range $.Computed}}, {{.SQLFormula}}{{end}} 
 			FROM {{.QualifiedTableName}}
@@ -393,14 +270,14 @@ WITH
 		)
 	{{range .Joins}},
 		{{.Alias}} AS (
-			SELECT '{{.Kind.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+			SELECT '{{.Kind.Kind}}' "_kind", "_parent", "_id"
                  	{{range .Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
 				    {{range .Computed}}, {{.SQLFormula}}{{end}} 
 				FROM {{.Kind.QualifiedTableName}}
 			{{$Join := .}}
 			{{if .WithDerived}}{{range .Kind.DerivedKinds}}
 			UNION ALL
-			SELECT '{{.Kind}}' "_kind", ("_parent").kind "ParentKind", ("_parent").id "ParentId", "_id"
+			SELECT '{{.Kind}}' "_kind", "_parent", "_id"
 					{{range $Join.Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
 					{{range $Join.Computed}}, {{.SQLFormula}}{{end}} 
 				FROM {{.QualifiedTableName}}
@@ -412,27 +289,27 @@ WITH
 	{{end}}
 SELECT
 	{{with .GroupedBy}}{{$JoinAlias := .Alias}}
-	{{$JoinAlias}}."_kind", {{$JoinAlias}}."ParentKind", {{$JoinAlias}}."ParentId", {{$JoinAlias}}."_id"
+	{{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"
 		{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
-		{{range .Computed}}, "{{.Name}}"{{end}}
+		{{range .Computed}}, {{$JoinAlias}}."{{.Name}}"{{end}}
 	{{range $i, $t := $.AggregatedTables}}{{$AggAlias := .Alias}}
 	{{range .Aggregates}}, {{.SQLText $AggAlias}}{{end}}
 	{{end}}
 	{{else}}
-	{{$.Alias}}."_kind", {{$.Alias}}."ParentKind", {{$.Alias}}."ParentId", {{$.Alias}}."_id"
+	{{$.Alias}}."_kind", {{$.Alias}}."_parent", {{$.Alias}}."_id"
 		{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $.Alias false}}{{end}}
-		{{range .Computed}}, "{{.Name}}"{{end}}
+		{{range .Computed}}, {{$.Alias}}."{{.Name}}"{{end}}
 	{{range .Joins}}{{$JoinAlias := .Alias}}
-		, {{$JoinAlias}}."_kind", {{$JoinAlias}}."ParentKind", {{$JoinAlias}}."ParentId", {{$JoinAlias}}."_id"
+		, {{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent", {{$JoinAlias}}."_id"
 		{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
-		{{range .Computed}}, "{{.Name}}"{{end}}
+		{{range .Computed}}, {{$JoinAlias}}."{{.Name}}"{{end}}
 	{{end}}
 	{{end}}
 	FROM {{$.Alias}}
-	{{range .Joins}}{{.JoinClause}}{{end}}
+	{{range $.Joins}}{{.JoinClause}}{{end}}
 	{{if gt .Conditions.Size 0}}WHERE {{.Conditions.WhereClause .Alias}}{{end}}
 	{{with .GroupedBy}}{{$JoinAlias := .Alias}}
-	GROUP BY {{$JoinAlias}}."_kind", {{$JoinAlias}}."ParentKind", {{$JoinAlias}}."ParentId", {{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
+	GROUP BY {{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent",{{$JoinAlias}}."_id"{{range .Kind.Columns}}, {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
 	{{end}}
 `}
 
@@ -454,8 +331,8 @@ func (query *Query) SQL() (s string, values []interface{}) {
 }
 
 func (query *Query) Execute() (ret [][]Persistable, err error) {
-	pg := GetPostgreSQLAdapter()
-	err = pg.TX(func(conn *sql.DB) (err error) {
+	query.pg = GetPostgreSQLAdapter()
+	err = query.pg.TX(func(conn *sql.DB) (err error) {
 		sqlText, values := query.SQL()
 		rows, err := conn.Query(sqlText, values...)
 		if err != nil {
@@ -499,7 +376,7 @@ func (query *Query) ExecuteSingle(e Persistable) (ret Persistable, err error) {
 		row := results[0]
 		ret = row[0]
 		if reflect.TypeOf(e) == reflect.TypeOf(ret) {
-			ret, err = ret.Kind().Copy(ret, e)
+			ret, err = Copy(ret, e)
 			if err != nil {
 				return
 			}
@@ -511,17 +388,24 @@ func (query *Query) ExecuteSingle(e Persistable) (ret Persistable, err error) {
 // -- E N T I T Y S C A N N E R ---------------------------------------------
 
 type KindScanner struct {
-	kind *Kind
+	Expects *Kind
+	kind    *Kind
 }
 
 func (scanner *KindScanner) Scan(value interface{}) (err error) {
 	switch k := value.(type) {
 	case string:
 		if k != "" {
-			kind := GetKindForKind(k)
+			kind := GetKind(k)
 			if kind == nil {
 				err = errors.New(fmt.Sprintf("Unknown kind '%s'", k))
 				return
+			}
+			if scanner.Expects != nil {
+				if !kind.DerivesFrom(scanner.Expects) {
+					err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'",
+						k, scanner.Expects.Kind))
+				}
 			}
 			scanner.kind = kind
 		} else {
@@ -535,34 +419,32 @@ func (scanner *KindScanner) Scan(value interface{}) (err error) {
 	return
 }
 
-type ParentScanner struct {
-	KindScanner
-	IDScanner
-	Parent *Key
-	count  int
+type KeyScanner struct {
+	Expects *Kind
+	Key     *Key
 }
 
-func (scanner *ParentScanner) Scan(value interface{}) (err error) {
-	switch scanner.count {
-	case 0:
-		if err = scanner.KindScanner.Scan(value); err != nil {
-			return
-		}
-	case 1:
-		if err = scanner.IDScanner.Scan(value); err != nil {
-			return
-		}
-		if scanner.kind == nil {
-			scanner.Parent = ZeroKey
-		} else {
-			if scanner.Parent, err = CreateKey(nil, scanner.kind, scanner.id); err != nil {
-				return
-			}
-
-		}
-		scanner.count = -1
+func (scanner *KeyScanner) Scan(value interface{}) (err error) {
+	chain := ""
+	switch c := value.(type) {
+	case []uint8:
+		chain = string(c)
+	case string:
+		chain = c
+	case nil:
+		chain = ""
+	default:
+		err = errors.New(fmt.Sprintf("expected string key chain, got '%v' (%T)", value, value))
 	}
-	scanner.count++
+	if err == nil {
+		scanner.Key, err = ParseKey(chain)
+		if scanner.Expects != nil && scanner.Key.Kind() != nil {
+			if !scanner.Key.Kind().DerivesFrom(scanner.Expects) {
+				err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'",
+					scanner.Key.Kind().Kind, scanner.Expects.Kind))
+			}
+		}
+	}
 	return
 }
 
@@ -587,7 +469,7 @@ type EntityScanner struct {
 	Master *Scanners
 	Kind   *Kind
 	KindScanner
-	ParentScanner
+	ParentScanner KeyScanner
 	IDScanner
 	SyntheticColumns []string
 	values           map[string]interface{}
@@ -620,7 +502,7 @@ func makeEntityScanner(query *Query, table *QueryTable) *EntityScanner {
 }
 
 func (scanner *EntityScanner) SQLScanners(scanners []interface{}) (ret []interface{}, err error) {
-	scanners = append(scanners, &scanner.KindScanner, &scanner.ParentScanner, &scanner.ParentScanner, &scanner.IDScanner)
+	scanners = append(scanners, &scanner.KindScanner, &scanner.ParentScanner, &scanner.IDScanner)
 	for _, column := range scanner.Kind.Columns {
 		scanners, err = column.Converter.Scanners(column, scanners, scanner.values)
 		if err != nil {
@@ -643,7 +525,7 @@ func (scanner *EntityScanner) Build() (entity Persistable, err error) {
 		err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'", scanner.kind.Kind, scanner.Kind.Kind))
 		return
 	}
-	entity, err = scanner.kind.Make(scanner.Parent, scanner.IDScanner.id)
+	entity, err = scanner.kind.Make(scanner.ParentScanner.Key, scanner.IDScanner.id)
 	if err != nil {
 		return
 	}

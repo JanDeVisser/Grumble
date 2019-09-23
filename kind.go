@@ -18,6 +18,7 @@ type Column struct {
 	VerboseName string
 	IsKey       bool
 	Scoped      bool
+	Required    bool
 	Converter   Converter
 }
 
@@ -100,20 +101,37 @@ func (k *Kind) ColumnByFieldName(name string) (col Column, ok bool) {
 var RegistryByType = make(map[reflect.Type]*Kind)
 var RegistryByKind = make(map[string]*Kind)
 
-func GetKind(obj Persistable) (kind *Kind) {
+func probeKind(obj interface{}) (kind *Kind) {
+	v := reflect.ValueOf(obj)
+	if v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		v = v.Elem()
+	}
+	return getKindForType(v.Type())
+}
+
+func GetKind(obj interface{}) (kind *Kind) {
 	switch e := obj.(type) {
+	case Persistable:
+		kind = e.Kind()
+		if kind == nil {
+			kind = probeKind(obj)
+		}
+		return
 	case *Key:
 		return e.kind
+	case Key:
+		return e.kind
+	case string:
+		return getKindForKind(e)
+	case reflect.Type:
+		return getKindForType(e)
+	case *Kind:
+		return e
+	case Kind:
+		return RegistryByKind[e.Kind]
 	default:
-		s := reflect.ValueOf(obj).Elem()
-		t := s.Type()
-		var ok bool
-		kind, ok = RegistryByType[t]
-		if !ok {
-			kind = createKind(t, obj)
-		}
+		return probeKind(obj)
 	}
-	return kind
 }
 
 func SetKind(e Persistable) *Kind {
@@ -133,7 +151,7 @@ func Initialize(e Persistable, parent *Key, id int) Persistable {
 	return e
 }
 
-func GetKindForType(t reflect.Type) *Kind {
+func getKindForType(t reflect.Type) *Kind {
 	var kind *Kind
 	kind, ok := RegistryByType[t]
 	if !ok {
@@ -142,7 +160,7 @@ func GetKindForType(t reflect.Type) *Kind {
 	return kind
 }
 
-func GetKindForKind(k string) *Kind {
+func getKindForKind(k string) *Kind {
 	k = strings.ReplaceAll(strings.ToLower(k), "/", ".")
 	if kind, ok := RegistryByKind[k]; ok {
 		return kind
@@ -157,6 +175,8 @@ func GetKindForKind(k string) *Kind {
 
 var persistable reflect.Type = nil
 var typeAdapter reflect.Type = nil
+
+var DoReconcile = true
 
 func createKind(t reflect.Type, obj interface{}) *Kind {
 	if persistable == nil {
@@ -200,8 +220,7 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 			keyFound = true
 			continue
 		case fld.Type.Kind() == reflect.Struct:
-			structType := fld.Type
-			structKind := GetKindForType(structType)
+			structKind := GetKind(fld.Type)
 			if structKind != nil {
 				if kind.base != nil {
 					panic(fmt.Sprintf("Kind '%s': Multiple inheritance not supported.", kind.Kind))
@@ -217,8 +236,10 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 			kind.CreateColumn(fld, converter, tags)
 		}
 	}
-	if err := kind.reconcile(); err != nil {
-		panic(err)
+	if DoReconcile {
+		if err := kind.reconcile(); err != nil {
+			panic(err)
+		}
 	}
 	RegistryByType[t] = kind
 	RegistryByKind[kind.Kind] = kind
@@ -297,8 +318,7 @@ func (k *Kind) GetConverter(field reflect.StructField, tags *Tags) (converter Co
 	taggedType := tags.Get("type")
 	switch {
 	case field.Type.Kind() == reflect.Ptr && field.Type.Elem().Kind() == reflect.Struct:
-		structType := field.Type.Elem()
-		structKind := GetKindForType(structType)
+		structKind := getKindForType(field.Type.Elem())
 		if structKind != nil {
 			converter = &ReferenceConverter{References: structKind}
 		}
@@ -327,12 +347,16 @@ func (k *Kind) CreateColumn(field reflect.StructField, converter Converter, tags
 	column.Index = make([]int, 1)
 	column.Index[0] = field.Index[0]
 	column.Converter = converter
+	column.Required = true
 	if v, ok := tags.GetBool("key"); ok && v {
 		column.IsKey = true
 		column.Scoped = true
 		if v, ok = tags.GetBool("scoped"); ok {
 			column.Scoped = v
 		}
+	}
+	if v, ok := tags.GetBool("required"); ok {
+		column.Required = v
 	}
 	if v, ok := tags.GetBool("label"); ok && v {
 		k.LabelCol = column.FieldName
@@ -363,7 +387,7 @@ func (k *Kind) reconcile() (err error) {
 		return
 	}
 	if _parentColumn.SQLType == "" {
-		_parentColumn.SQLType = fmt.Sprintf("%q.\"Reference\"", table.pg.Schema)
+		_parentColumn.SQLType = fmt.Sprintf("%q.\"Reference\"[]", table.pg.Schema)
 	}
 	if err = table.AddColumn(_parentColumn); err != nil {
 		return
@@ -415,16 +439,4 @@ func (k *Kind) Make(parent *Key, id int) (entity Persistable, err error) {
 
 func (k *Kind) New(parent *Key) (entity Persistable, err error) {
 	return k.Make(parent, 0)
-}
-
-func (k *Kind) Copy(src, target Persistable) (ret Persistable, err error) {
-	target.Initialize(src.Parent(), src.Id())
-	sourceValue := reflect.ValueOf(src).Elem()
-	targetValue := reflect.ValueOf(target).Elem()
-	for _, column := range k.Columns {
-		sourceField := sourceValue.FieldByIndex(column.Index)
-		targetField := targetValue.FieldByIndex(column.Index)
-		targetField.Set(sourceField)
-	}
-	return target, nil
 }
