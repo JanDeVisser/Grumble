@@ -158,7 +158,7 @@ func (join Join) JoinClause() string {
 		if !ok {
 			panic(fmt.Sprintf("Invalid column '%s' in join", join.FieldName))
 		}
-		column = c.ColumnName
+		column = fmt.Sprintf("%q", c.ColumnName)
 	}
 	if join.FieldName != "" {
 		alias1 := join.Alias
@@ -167,7 +167,7 @@ func (join Join) JoinClause() string {
 			alias1 = join.Query.Alias
 			alias2 = join.Alias
 		}
-		clause = fmt.Sprintf("%s JOIN %s ON ( (%s.\"_kind\", %s.\"_id\") = %s.%q)",
+		clause = fmt.Sprintf("%s JOIN %s ON ( (%s.\"_kind\", %s.\"_id\") = %s.%s)",
 			join.JoinType, join.Alias, alias1, alias1, alias2, column)
 	}
 	if clause == "" {
@@ -207,6 +207,23 @@ func (query *Query) AddJoin(join Join) *Query {
 func (query *Query) AddCount() *Query {
 	agg := Aggregate{Function: "COUNT", Column: "*", Name: fmt.Sprintf("%sCount", query.Kind.Basename())}
 	query.AddAggregate(agg)
+	return query
+}
+
+func (query *Query) AddReferenceJoins() *Query {
+	for _, col := range query.Kind.Columns {
+		if converter, ok := col.Converter.(*ReferenceConverter); ok {
+			j := Join{
+				QueryTable: QueryTable{
+					Kind:        converter.References,
+					GroupBy:     false,
+					WithDerived: true,
+				},
+				FieldName:  col.ColumnName,
+			}
+			query.AddJoin(j)
+		}
+	}
 	return query
 }
 
@@ -257,13 +274,13 @@ var querySQL = SQLTemplate{Name: "Query", SQL: `
 WITH 
 	{{.Alias}} AS (
 		SELECT '{{.Kind.Kind}}' "_kind", "_parent", "_id"
-				{{range .Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+				{{range .Kind.Columns}}, {{.Formula}} {{.Converter.SQLTextIn . "" true}}{{end}} 
 				{{range .Computed}}, {{.SQLFormula}}{{end}} 
 			FROM {{.Kind.QualifiedTableName}}
 		{{if .WithDerived}}{{range .Kind.DerivedKinds}}
 		UNION ALL
 		SELECT '{{.Kind}}' "_kind", "_parent", "_id"
- 				{{range $.Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+ 				{{range $.Kind.Columns}}, {{.Formula}} {{.Converter.SQLTextIn . "" true}}{{end}} 
 				{{range $.Computed}}, {{.SQLFormula}}{{end}} 
 			FROM {{.QualifiedTableName}}
 		{{end}}{{end}}
@@ -271,14 +288,14 @@ WITH
 	{{range .Joins}},
 		{{.Alias}} AS (
 			SELECT '{{.Kind.Kind}}' "_kind", "_parent", "_id"
-                 	{{range .Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+                 	{{range .Kind.Columns}}, {{.Formula}} {{.Converter.SQLTextIn . "" true}}{{end}} 
 				    {{range .Computed}}, {{.SQLFormula}}{{end}} 
 				FROM {{.Kind.QualifiedTableName}}
 			{{$Join := .}}
 			{{if .WithDerived}}{{range .Kind.DerivedKinds}}
 			UNION ALL
 			SELECT '{{.Kind}}' "_kind", "_parent", "_id"
-					{{range $Join.Kind.Columns}}, {{.Converter.SQLTextIn . "" true}}{{end}} 
+					{{range $Join.Kind.Columns}}, {{.Formula}} {{.Converter.SQLTextIn . "" true}}{{end}} 
 					{{range $Join.Computed}}, {{.SQLFormula}}{{end}} 
 				FROM {{.QualifiedTableName}}
 			{{end}}{{end}}
@@ -546,18 +563,23 @@ type Scanners struct {
 	Query       *Query
 	Scanners    []*EntityScanner
 	sqlScanners []interface{}
+	references  map[string]int
 }
 
 func MakeScanners(query *Query) (ret *Scanners, err error) {
 	ret = new(Scanners)
 	ret.Query = query
 	ret.Scanners = make([]*EntityScanner, 1)
+	ret.references = make(map[string]int)
 	if t := query.GroupedBy(); t != nil {
 		ret.Scanners[0] = makeEntityScanner(ret.Query, t)
 	} else {
 		ret.Scanners[0] = makeEntityScanner(ret.Query, &query.QueryTable)
 		for _, join := range query.Joins {
 			ret.Scanners = append(ret.Scanners, makeEntityScanner(ret.Query, &join.QueryTable))
+			if join.JoinType == Inner {
+				ret.references[join.FieldName] = len(ret.Scanners) - 1
+			}
 		}
 	}
 	return
@@ -585,6 +607,10 @@ func (scanners *Scanners) Build() (ret []Persistable, err error) {
 			return nil, err
 		}
 		ret = append(ret, e)
+	}
+	e := ret[0]
+	for columnName, ix := range scanners.references {
+		e.SetField(columnName, ret[ix])
 	}
 	return
 }

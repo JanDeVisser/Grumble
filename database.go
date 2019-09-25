@@ -29,6 +29,7 @@ type PostgreSQLAdapter struct {
 	WipeSchema    bool
 	DatabaseInit  string
 	SchemaInit    string
+	Reconcile	  bool
 }
 
 var once sync.Once
@@ -44,6 +45,7 @@ var defaultAdapter = PostgreSQLAdapter{
 	WipeSchema:    false,
 	DatabaseInit:  "",
 	SchemaInit:    "",
+	Reconcile:     true,
 }
 
 var adapter *PostgreSQLAdapter
@@ -336,7 +338,7 @@ func (pg PostgreSQLAdapter) makeTable(tableName string) SQLTable {
 }
 
 func (table SQLTable) QualifiedName() string {
-	return fmt.Sprintf("\"%s\".\"%s\"", table.Schema, table.TableName)
+	return fmt.Sprintf("%q.%q", table.Schema, table.TableName)
 }
 
 func (table SQLTable) exists(conn *sql.DB) (result bool, err error) {
@@ -725,6 +727,10 @@ func (table SQLTable) alterDropIndex(conn *sql.DB, index string) (err error) {
 }
 
 func (table SQLTable) reconcileColumn(conn *sql.DB, newColumn SQLColumn, oldColumn *SQLColumn) (err error) {
+	// HACK
+	if oldColumn.SQLType == "ARRAY" || oldColumn.SQLType == "USER-DEFINED" {
+		return
+	}
 	if newColumn.SQLType != oldColumn.SQLType {
 		if err = table.alterDropColumn(conn, newColumn); err != nil {
 			return
@@ -776,6 +782,9 @@ func (table SQLTable) Reconcile() (err error) {
 		}
 		if !exists {
 			err = table.create(conn)
+			return
+		}
+		if !table.pg.Reconcile {
 			return
 		}
 		if err = current.Sync(); err != nil {

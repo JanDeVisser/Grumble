@@ -14,6 +14,8 @@ type Persistable interface {
 	AsKey() *Key
 	Id() int
 	Self() (Persistable, error)
+	Field(string) interface{}
+	SetField(string, interface{})
 	Populated() bool
 	SetPopulated()
 	SyntheticField(string) (interface{}, bool)
@@ -80,6 +82,7 @@ func Get(e Persistable, id int) (ret Persistable, err error) {
 	}
 	query := MakeQuery(e)
 	query.AddCondition(HasId{Id: id})
+	query.AddReferenceJoins()
 	ret, err = query.ExecuteSingle(e)
 	if err != nil {
 		return
@@ -93,7 +96,7 @@ func Inflate(e Persistable) (err error) {
 }
 
 var updateEntity = SQLTemplate{Name: "UpdateEntity", SQL: `UPDATE {{.QualifiedTableName}}
-	SET {{range $i, $c := .Columns}}{{if gt $i 0}},{{end}} "{{$c.ColumnName}}" = {{$c.Converter.SQLTextOut .}}{{end}}
+	SET {{range $i, $c := .Columns}}{{if gt $i 0}},{{end}} {{if not .Formula}}"{{$c.ColumnName}}" = {{$c.Converter.SQLTextOut .}}{{end}}{{end}}
 	WHERE "_id" = __count__
 `}
 
@@ -111,11 +114,13 @@ func update(e Persistable) (err error) {
 		}
 		values := make([]interface{}, 0)
 		for _, column := range k.Columns {
-			columnValues, err := column.Converter.Value(e, column)
-			if err != nil {
-				return err
+			if column.Formula == "" {
+				columnValues, err := column.Converter.Value(e, column)
+				if err != nil {
+					return err
+				}
+				values = append(values, columnValues...)
 			}
-			values = append(values, columnValues...)
 		}
 		values = append(values, e.Id())
 		if _, err = conn.Exec(sqlText, values...); err != nil {
@@ -127,9 +132,9 @@ func update(e Persistable) (err error) {
 }
 
 var insertEntity = SQLTemplate{Name: "InsertNewEntity", SQL: `INSERT INTO {{.QualifiedTableName}}
-	( "_parent"{{range $i, $c := .Columns}}, "{{$c.ColumnName}}"{{end}} )
+	( "_parent"{{range $i, $c := .Columns}}{{if not .Formula}}, "{{$c.ColumnName}}"{{end}}{{end}} )
 	VALUES
-	( __count__{{range .Columns}}, {{.Converter.SQLTextOut .}}{{end}} )
+	( __count__{{range .Columns}}{{if not .Formula}}, {{.Converter.SQLTextOut .}}{{end}}{{end}} )
 	RETURNING "_id"
 `}
 
@@ -145,11 +150,13 @@ func insert(e Persistable) (err error) {
 		values := make([]interface{}, 0)
 		values = append(values, e.AsKey().Parent().Chain())
 		for _, column := range k.Columns {
-			columnValues, err := column.Converter.Value(e, column)
-			if err != nil {
-				return err
+			if column.Formula == "" {
+				columnValues, err := column.Converter.Value(e, column)
+				if err != nil {
+					return err
+				}
+				values = append(values, columnValues...)
 			}
-			values = append(values, columnValues...)
 		}
 		row := conn.QueryRow(sqlText, values...)
 		var id int

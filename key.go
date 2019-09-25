@@ -152,11 +152,30 @@ func (key *Key) Chain() string {
 }
 
 func (key *Key) Field(fieldName string) interface{} {
-	v := reflect.ValueOf(key)
-	if fld := v.FieldByName(fieldName); fld.IsValid() && fld.CanInterface() {
+	v := reflect.ValueOf(key).Elem()
+	if v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		v = v.Elem()
+	}
+	fld := v.FieldByNameFunc(func(s string) bool {
+		return strings.ToLower(s) == strings.ToLower(fieldName)
+	})
+	if fld.IsValid() && fld.CanInterface() {
 		return fld.Interface()
 	} else {
 		return nil
+	}
+}
+
+func (key *Key) SetField(fieldName string, value interface{}) {
+	v := reflect.ValueOf(key)
+	if v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		v = v.Elem()
+	}
+	fld := v.FieldByNameFunc(func(s string) bool {
+		return strings.ToLower(s) == strings.ToLower(fieldName)
+	})
+	if fld.IsValid() {
+		fld.Set(reflect.ValueOf(value))
 	}
 }
 

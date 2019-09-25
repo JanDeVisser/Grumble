@@ -31,13 +31,13 @@ var ConvertersForKind = map[reflect.Kind]Converter{
 	reflect.Uint16:  &BasicConverter{"integer"},
 	reflect.Uint32:  &BasicConverter{"integer"},
 	reflect.Uint64:  &BasicConverter{"integer"},
-	reflect.Float32: &BasicConverter{"float"},
-	reflect.Float64: &BasicConverter{"float"},
+	reflect.Float32: &BasicConverter{"double precision"},
+	reflect.Float64: &BasicConverter{"double precision"},
 	reflect.String:  &BasicConverter{"text"},
 }
 
 var ConvertersForType = map[reflect.Type]Converter{
-	reflect.TypeOf(time.Time{}): &BasicConverter{"timestamp"},
+	reflect.TypeOf(time.Time{}): &BasicConverter{"timestamp without time zone"},
 }
 
 // -- B A S I C  T Y P E S --------------------------------------------------

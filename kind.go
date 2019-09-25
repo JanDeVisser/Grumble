@@ -15,6 +15,7 @@ type Column struct {
 	FieldName   string
 	Index       []int
 	ColumnName  string
+	Formula		string
 	VerboseName string
 	IsKey       bool
 	Scoped      bool
@@ -201,6 +202,8 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 	kind.columnsByName = make(map[string]int)
 	kind.typ = t
 	keyFound := false
+	RegistryByType[t] = kind
+	RegistryByKind[kind.Kind] = kind
 	for i := 0; i < t.NumField(); i++ {
 		fld := t.Field(i)
 		r, _ := utf8.DecodeRuneInString(fld.Name)
@@ -241,8 +244,6 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 			panic(err)
 		}
 	}
-	RegistryByType[t] = kind
-	RegistryByKind[kind.Kind] = kind
 	return kind
 }
 
@@ -324,12 +325,8 @@ func (k *Kind) GetConverter(field reflect.StructField, tags *Tags) (converter Co
 		}
 	case field.Type.Implements(typeAdapter):
 		instance := reflect.New(field.Type).Interface()
-		adapt, ok := instance.(Adapter)
-		if ok {
-			converter = adapt.Converter(field, tags)
-		} else {
-			panic("?? Cannot cast to Adapter??")
-		}
+		adapt := instance.(Adapter)
+		converter = adapt.Converter(field, tags)
 	case taggedType != "":
 		converter = &BasicConverter{taggedType}
 	case ConvertersForType[field.Type] != nil:
@@ -366,6 +363,7 @@ func (k *Kind) CreateColumn(field reflect.StructField, converter Converter, tags
 	} else {
 		column.ColumnName = column.FieldName
 	}
+	column.Formula = tags.Get("formula")
 	if tags.Has("verbosename") {
 		column.VerboseName = tags.Get("verbosename")
 	} else {
@@ -396,21 +394,23 @@ func (k *Kind) reconcile() (err error) {
 		return
 	}
 	for _, col := range k.Columns {
-		c := SQLColumn{}
-		c.Name = col.ColumnName
-		c.SQLType = col.Converter.SQLType(col)
-		if err = table.AddColumn(c); err != nil {
-			return
-		}
-		if col.IsKey {
-			keyCols := make([]string, 2)
-			if col.Scoped {
-				keyCols = append(keyCols, "_parent")
-			}
-			keyCols = append(keyCols, col.ColumnName)
-			index := SQLIndex{Columns: keyCols, PrimaryKey: false, Unique: true}
-			if err = table.AddIndex(index); err != nil {
+		if col.Formula == "" {
+			c := SQLColumn{}
+			c.Name = col.ColumnName
+			c.SQLType = col.Converter.SQLType(col)
+			if err = table.AddColumn(c); err != nil {
 				return
+			}
+			if col.IsKey {
+				keyCols := make([]string, 2)
+				if col.Scoped {
+					keyCols = append(keyCols, "_parent")
+				}
+				keyCols = append(keyCols, col.ColumnName)
+				index := SQLIndex{Columns: keyCols, PrimaryKey: false, Unique: true}
+				if err = table.AddIndex(index); err != nil {
+					return
+				}
 			}
 		}
 	}
@@ -439,4 +439,10 @@ func (k *Kind) Make(parent *Key, id int) (entity Persistable, err error) {
 
 func (k *Kind) New(parent *Key) (entity Persistable, err error) {
 	return k.Make(parent, 0)
+}
+
+func (k *Kind) By(columnName string, value interface{}) (entity Persistable, err error) {
+	q := MakeQuery(k)
+	q.AddFilter(columnName, value)
+	return q.ExecuteSingle(nil)
 }

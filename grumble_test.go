@@ -10,6 +10,7 @@ import (
 const ProductKind = "github.com.jandevisser.grumble.product"
 const FruitKind = "github.com.jandevisser.grumble.fruit"
 const SaleKind = "github.com.jandevisser.grumble.sale"
+const SelfRefKind = "github.com.jandevisser.grumble.selfref"
 const SampleId = 42
 
 const VegetableCat = "Vegetable"
@@ -120,6 +121,7 @@ func CreateSale(product *Product, quantity int) (sale *Sale, err error) {
 
 var SquashID int
 var AppleID int
+var SaleID int
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
@@ -147,6 +149,26 @@ func TestGetKindForType_Reference(t *testing.T) {
 	k := GetKind(reflect.TypeOf(Sale{}))
 	if k == nil {
 		t.Fatal("Could not get kind for Sale")
+	}
+}
+
+type SelfRef struct {
+	Key
+	SelfRef *SelfRef
+}
+
+func TestGetKind_SelfRef(t *testing.T)  {
+	k := GetKind(SelfRef{})
+	if k == nil {
+		t.Fatal("Could not get kind for SelfRef")
+	}
+	col, ok := k.Column("SelfRef")
+	if !ok {
+		t.Fatal("Column SelfRef not found")
+	}
+	converter := col.Converter.(*ReferenceConverter)
+	if converter.References.Kind != SelfRefKind {
+		t.Fatal("SelfRef.SelfRef doesn't reference SelfRef")
 	}
 }
 
@@ -356,6 +378,19 @@ func TestPut_insertReference(t *testing.T) {
 	}
 	if err := Put(sale); err != nil {
 		t.Fatalf("Could not persist Sale entity: %s", err)
+	}
+	SaleID = sale.Id()
+}
+
+func TestGet_WithReference(t *testing.T) {
+	e, err := Get(&Sale{}, SaleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sale := e.(*Sale)
+	p := sale.Product
+	if p.Name != Apple {
+		t.Fatalf("Product is not %q but %q", Apple, p.Name)
 	}
 }
 
