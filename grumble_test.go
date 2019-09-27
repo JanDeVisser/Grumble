@@ -38,6 +38,16 @@ type Department struct {
 	Description string
 }
 
+var mgr *EntityManager
+
+func TestMakeEntityManager(t *testing.T) {
+	var err error
+	mgr, err = MakeEntityManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func CreateDepartment(parent *Department, name string, description string) (department *Department, err error) {
 	var p *Key
 	if parent != nil {
@@ -50,7 +60,7 @@ func CreateDepartment(parent *Department, name string, description string) (depa
 	department, _ = e.(*Department)
 	department.Name = name
 	department.Description = description
-	err = Put(department)
+	err = mgr.Put(department)
 	return
 }
 
@@ -74,7 +84,7 @@ func CreateProduct(name string, category string, price float64) (product *Produc
 		Category: category,
 		Price:    price,
 	}
-	err = Put(product)
+	err = mgr.Put(product)
 	return
 }
 
@@ -100,7 +110,7 @@ func CreateFruit(name string, color string, price float64) (fruit *Fruit, err er
 		},
 		Color: color,
 	}
-	err = Put(fruit)
+	err = mgr.Put(fruit)
 	return
 }
 
@@ -115,7 +125,7 @@ func CreateSale(product *Product, quantity int) (sale *Sale, err error) {
 		Quantity: quantity,
 		Product:  product,
 	}
-	err = Put(sale)
+	err = mgr.Put(sale)
 	return
 }
 
@@ -157,7 +167,7 @@ type SelfRef struct {
 	SelfRef *SelfRef
 }
 
-func TestGetKind_SelfRef(t *testing.T)  {
+func TestGetKind_SelfRef(t *testing.T) {
 	k := GetKind(SelfRef{})
 	if k == nil {
 		t.Fatal("Could not get kind for SelfRef")
@@ -246,7 +256,7 @@ func TestPut_insert(t *testing.T) {
 	product.Name = Squash
 	product.Category = VegetableCat
 	product.Price = SquashPrice
-	if err := Put(product); err != nil {
+	if err := mgr.Put(product); err != nil {
 		t.Fatalf("Could not persist product entity: %s", err)
 	}
 	SquashID = product.Id()
@@ -254,7 +264,7 @@ func TestPut_insert(t *testing.T) {
 
 func TestGet_1(t *testing.T) {
 	squash := &Product{}
-	_, err := Get(squash, SquashID)
+	_, err := mgr.Get(squash, SquashID)
 	if err != nil {
 		t.Fatalf("Could not Get(%d): %s", SquashID, err)
 	}
@@ -268,19 +278,19 @@ func TestGet_1(t *testing.T) {
 
 func TestPut_update(t *testing.T) {
 	squash := &Product{}
-	_, err := Get(squash, SquashID)
+	_, err := mgr.Get(squash, SquashID)
 	if err != nil {
 		t.Fatalf("Could not Get(%d): %s", SquashID, err)
 	}
 	squash.Price = SquashPriceNew
-	if err := Put(squash); err != nil {
+	if err := mgr.Put(squash); err != nil {
 		t.Fatalf("Could not persist squash entity: %s", err)
 	}
 }
 
 func TestGet_2(t *testing.T) {
 	squash := &Product{}
-	_, err := Get(squash, SquashID)
+	_, err := mgr.Get(squash, SquashID)
 	if err != nil {
 		t.Fatalf("Could not Get(%d): %s", SquashID, err)
 	}
@@ -295,7 +305,7 @@ func TestGet_ByKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	var squash *Product
-	e, err := Get(key, SquashID)
+	e, err := mgr.Get(key, SquashID)
 	if err != nil {
 		t.Fatalf("Could not Get(%d) by Key: %s", SquashID, err)
 	}
@@ -309,7 +319,7 @@ func TestGet_ByKey(t *testing.T) {
 }
 
 func TestMakeQuery(t *testing.T) {
-	q := MakeQuery(&Product{})
+	q := mgr.MakeQuery(&Product{})
 	q.AddFilter("Category", "Vegetable")
 	q.AddFilter("Bogus", 42)
 	results, err := q.Execute()
@@ -338,13 +348,13 @@ func TestPut_insertDerived(t *testing.T) {
 		t.Fatal(err)
 	}
 	AppleID = fruit.Id()
-	if err := Put(fruit); err != nil {
+	if err := mgr.Put(fruit); err != nil {
 		t.Fatalf("Could not persist fruit entity: %s", err)
 	}
 }
 
 func TestMakeQuery_WithDerived(t *testing.T) {
-	q := MakeQuery(&Product{})
+	q := mgr.MakeQuery(&Product{})
 	q.WithDerived = true
 	q.AddFilter("Category", FruitCat)
 	results, err := q.Execute()
@@ -376,21 +386,20 @@ func TestPut_insertReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Put(sale); err != nil {
+	if err := mgr.Put(sale); err != nil {
 		t.Fatalf("Could not persist Sale entity: %s", err)
 	}
 	SaleID = sale.Id()
 }
 
 func TestGet_WithReference(t *testing.T) {
-	e, err := Get(&Sale{}, SaleID)
+	e, err := mgr.Get(&Sale{}, SaleID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sale := e.(*Sale)
-	p := sale.Product
-	if p.Name != Apple {
-		t.Fatalf("Product is not %q but %q", Apple, p.Name)
+	if sale.Product.Name != Apple {
+		t.Fatalf("Product is not %q but %q", Apple, sale.Product.Name)
 	}
 }
 
@@ -399,13 +408,13 @@ func TestPut_insertNilReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Put(sale); err != nil {
+	if err := mgr.Put(sale); err != nil {
 		t.Fatalf("Could not persist Sale entity: %s", err)
 	}
 }
 
 func TestMakeQuery_WithReference(t *testing.T) {
-	q := MakeQuery(&Sale{})
+	q := mgr.MakeQuery(&Sale{})
 	q.WithDerived = true
 	q.AddFilter("Quantity", AppleSaleQuantity)
 	results, err := q.Execute()
@@ -427,7 +436,7 @@ func TestMakeQuery_WithReference(t *testing.T) {
 		t.Fatalf("Entity's fields not restored properly: %d != %d",
 			sale.Quantity, AppleSaleQuantity)
 	}
-	product, err := Get(sale.Product, sale.Product.Id())
+	product, err := mgr.Get(sale.Product, sale.Product.Id())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +450,7 @@ func TestMakeQuery_WithReference(t *testing.T) {
 }
 
 func TestMakeQuery_WithJoin(t *testing.T) {
-	q := MakeQuery(&Sale{})
+	q := mgr.MakeQuery(&Sale{})
 	q.WithDerived = true
 	q.AddFilter("Quantity", AppleSaleQuantity)
 	join := Join{QueryTable: QueryTable{Kind: GetKind(ProductKind), WithDerived: true}, FieldName: "Product"}
@@ -479,10 +488,10 @@ func TestMakeQuery_WithJoin(t *testing.T) {
 }
 
 func TestMakeQuery_OuterJoin(t *testing.T) {
-	q := MakeQuery(&Product{})
+	q := mgr.MakeQuery(&Product{})
 	q.WithDerived = true
 	q.AddFilter("Category", FruitCat)
-	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", JoinType: Outer}
+	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", Direction: ReferredBy}
 	q.AddJoin(join)
 	results, err := q.Execute()
 	if err != nil {
@@ -517,10 +526,10 @@ func TestMakeQuery_OuterJoin(t *testing.T) {
 }
 
 func TestMakeQuery_OuterJoin_NoMatch(t *testing.T) {
-	q := MakeQuery(&Product{})
+	q := mgr.MakeQuery(&Product{})
 	q.WithDerived = true
 	q.AddFilter("Category", VegetableCat)
-	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", JoinType: Outer}
+	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", Direction: ReferredBy, JoinType: Outer}
 	q.AddJoin(join)
 	results, err := q.Execute()
 	if err != nil {
@@ -561,10 +570,10 @@ func TestMakeQuery_OuterJoin_Aggregate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	q := MakeQuery(&Product{})
+	q := mgr.MakeQuery(&Product{})
 	q.WithDerived = true
 	q.AddFilter("Category", FruitCat)
-	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", JoinType: Outer}
+	join := Join{QueryTable: QueryTable{Kind: GetKind(&Sale{})}, FieldName: "Product", Direction: ReferredBy}
 	join.AddAggregate(Aggregate{
 		Function: "SUM",
 		Column:   "Quantity",
@@ -620,7 +629,7 @@ func TestPut_Hierarchy(t *testing.T) {
 func TestQuery_Hierarchy(t *testing.T) {
 	groceries := &Department{}
 	Initialize(groceries, nil, GroceriesID)
-	q := MakeQuery(groceries)
+	q := mgr.MakeQuery(groceries)
 	q.WithDerived = true
 	q.HasParent(groceries)
 	results, err := q.Execute()
@@ -648,7 +657,7 @@ func TestQuery_Hierarchy(t *testing.T) {
 }
 
 func TestQuery_Computed(t *testing.T) {
-	q := MakeQuery(&Product{})
+	q := mgr.MakeQuery(&Product{})
 	q.WithDerived = true
 	q.AddComputedColumn(Computed{
 		Formula: "(CASE WHEN \"Price\" > 1 THEN 'Expensive' ELSE 'Cheap' END)",

@@ -17,12 +17,12 @@ func TestGetPostgreSQLAdapter(t *testing.T) {
 
 func TestPostgreSQLAdapter_GetConnection(t *testing.T) {
 	pg := GetPostgreSQLAdapter()
-	conn := pg.GetConnection(false)
+	conn := pg.GetConnection()
 	err := conn.Ping()
 	if err != nil {
 		t.Fatalf("Could not ping non-admin connection")
 	}
-	conn = pg.GetConnection(true)
+	conn = pg.GetAdminConnection()
 	err = conn.Ping()
 	if err != nil {
 		t.Errorf("Could not ping admin connection")

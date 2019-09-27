@@ -29,7 +29,9 @@ type PostgreSQLAdapter struct {
 	WipeSchema    bool
 	DatabaseInit  string
 	SchemaInit    string
-	Reconcile	  bool
+	Reconcile     bool
+	conn          map[bool]*sql.DB
+	tx            map[*sql.DB]*sql.Tx
 }
 
 var once sync.Once
@@ -156,14 +158,29 @@ func GetPostgreSQLAdapter() *PostgreSQLAdapter {
 			log.Printf("Error decoding database.conf: %s\n", err.Error())
 			adapter = &defaultAdapter
 		}
+		adapter.conn = make(map[bool]*sql.DB)
+		adapter.tx = make(map[*sql.DB]*sql.Tx)
 		adapter.initialize()
 	})
 	ret := new(PostgreSQLAdapter)
 	*ret = *adapter
+	ret.conn = make(map[bool]*sql.DB)
+	ret.tx = make(map[*sql.DB]*sql.Tx)
 	return ret
 }
 
-func (pg PostgreSQLAdapter) GetConnection(admin bool) *sql.DB {
+func (pg *PostgreSQLAdapter) GetConnection() *sql.DB {
+	return pg.getConnection(false)
+}
+
+func (pg *PostgreSQLAdapter) GetAdminConnection() *sql.DB {
+	return pg.getConnection(true)
+}
+
+func (pg *PostgreSQLAdapter) getConnection(admin bool) *sql.DB {
+	if pg.conn[admin] != nil {
+		return pg.conn[admin]
+	}
 	var user, pwd string
 	if admin {
 		user = pg.AdminUser
@@ -172,48 +189,122 @@ func (pg PostgreSQLAdapter) GetConnection(admin bool) *sql.DB {
 		user = pg.Username
 		pwd = pg.Password
 	}
-	connStr := fmt.Sprintf("user=%s password=%s dbname=%s host=%s", user, pwd, pg.DatabaseName, pg.Hostname)
+	connStr := fmt.Sprintf("user=%s password=%s dbname=%s host=%s sslmode=disable",
+		user, pwd, pg.DatabaseName, pg.Hostname)
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
 	}
+	pg.conn[admin] = db
 	return db
+}
+
+func (pg *PostgreSQLAdapter) Close() {
+	pg.CloseConnection(false)
+}
+
+func (pg *PostgreSQLAdapter) CloseConnection(admin bool) {
+	if err := pg.CommitTX(admin); err != nil {
+		log.Printf("Error committing transaction: %q", err)
+	}
+	if pg.conn[admin] != nil {
+		if err := pg.conn[admin].Close(); err != nil {
+			log.Fatal(err)
+		}
+		delete(pg.conn, admin)
+	}
+}
+
+func (pg *PostgreSQLAdapter) Begin() (err error) {
+	return pg.BeginTX(false)
+}
+
+func (pg *PostgreSQLAdapter) BeginTX(admin bool) (err error) {
+	conn := pg.getConnection(admin)
+	tx := pg.tx[conn]
+	if tx != nil {
+		return
+	}
+	if tx, err = conn.Begin(); err != nil {
+		return
+	}
+	pg.tx[conn] = tx
+	return
+}
+
+func (pg *PostgreSQLAdapter) Commit() (err error) {
+	return pg.CommitTX(false)
+}
+
+func (pg *PostgreSQLAdapter) CommitTX(admin bool) (err error) {
+	conn := pg.getConnection(admin)
+	tx := pg.tx[conn]
+	if tx == nil {
+		return
+	}
+	err = tx.Commit()
+	delete(pg.tx, conn)
+	return
+}
+
+func (pg *PostgreSQLAdapter) Rollback() (err error) {
+	return pg.RollbackTX(false)
+}
+
+func (pg *PostgreSQLAdapter) RollbackTX(admin bool) (err error) {
+	conn := pg.getConnection(admin)
+	tx := pg.tx[conn]
+	if tx == nil {
+		return
+	}
+	err = tx.Rollback()
+	delete(pg.tx, conn)
+	return
+}
+
+func (pg PostgreSQLAdapter) Work(work func(*sql.DB) error) (ret error) {
+	return pg.doWork(false, work)
+}
+
+func (pg PostgreSQLAdapter) doWork(admin bool, work func(*sql.DB) error) (ret error) {
+	conn, leaveOpen := pg.conn[admin]
+	defer func() {
+		if !leaveOpen {
+			pg.CloseConnection(admin)
+		}
+	}()
+	if !leaveOpen {
+		conn = pg.getConnection(admin)
+	}
+	ret = work(conn)
+	return
 }
 
 func (pg PostgreSQLAdapter) TX(work func(*sql.DB) error) (ret error) {
 	return pg.runTX(false, work)
 }
 
-func (pg PostgreSQLAdapter) runTX(admin bool, work func(*sql.DB) error) (ret error) {
-	ret = nil
-	conn := pg.GetConnection(admin)
-	defer func() {
-		e := conn.Close()
-		if ret == nil {
-			ret = e
-		}
-	}()
-	var tx *sql.Tx
-	if tx, ret = conn.Begin(); ret == nil {
-		defer func() {
-			e := tx.Commit()
-			if ret == nil {
-				ret = e
+func (pg PostgreSQLAdapter) runTX(admin bool, work func(*sql.DB) error) (err error) {
+	return pg.doWork(admin, func(db *sql.DB) (err error) {
+		if _, txActive := pg.tx[db]; txActive {
+			err = work(db)
+		} else {
+			if err = pg.BeginTX(admin); err == nil {
+				defer func() {
+					if err == nil {
+						err = pg.CommitTX(admin)
+					} else {
+						if e := pg.RollbackTX(admin); e != nil {
+							// FIXME Wrap err in e
+							log.Printf("Error rolling back transaction: '%s'", e)
+						}
+					}
+				}()
+				err = work(db)
 			}
-		}()
-		if ret = work(conn); ret != nil {
-			defer func() {
-				e := tx.Rollback()
-				if ret == nil {
-					ret = e
-				}
-			}()
-			return
 		}
-	} else {
 		return
-	}
-	return
+	})
 }
 
 func (pg PostgreSQLAdapter) runSQLFile(conn *sql.DB, sqlFile string) (err error) {
@@ -325,7 +416,9 @@ func (pg PostgreSQLAdapter) GetSchema() string {
 }
 
 func (pg PostgreSQLAdapter) ResetSchema() (err error) {
-	return pg.resetSchema(true, pg.GetConnection(true))
+	return pg.runTX(true, func(db *sql.DB) error {
+		return pg.resetSchema(true, db)
+	})
 }
 
 func (pg PostgreSQLAdapter) makeTable(tableName string) SQLTable {
@@ -529,7 +622,7 @@ func (table *SQLTable) syncColumns(conn *sql.DB) (err error) {
 }
 
 func (table *SQLTable) Sync() (err error) {
-	err = table.pg.TX(func(conn *sql.DB) (err error) {
+	return table.pg.TX(func(conn *sql.DB) (err error) {
 		table.Columns = make([]SQLColumn, 0)
 		table.Indexes = make([]SQLIndex, 0)
 		table.columnsByName = make(map[string]int)
@@ -549,7 +642,6 @@ func (table *SQLTable) Sync() (err error) {
 		}
 		return
 	})
-	return
 }
 
 func (table *SQLTable) AddColumn(column SQLColumn) (err error) {
@@ -846,11 +938,9 @@ func (table SQLTable) Reconcile() (err error) {
 }
 
 func (table SQLTable) Drop() (err error) {
-	return table.pg.TX(func(conn *sql.DB) (err error) {
+	return table.pg.TX(func(db *sql.DB) (err error) {
 		s := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", table.QualifiedName())
-		if _, err = conn.Exec(s); err != nil {
-			return
-		}
+		_, err = table.pg.GetConnection().Exec(s)
 		return
 	})
 }

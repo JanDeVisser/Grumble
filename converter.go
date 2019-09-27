@@ -110,10 +110,10 @@ func (scanner *ReferenceScanner) Scan(src interface{}) (err error) {
 		if err != nil {
 			return err
 		}
-		e, err = Get(e, scanner.Key.Id())
-		if err != nil {
-			return err
-		}
+		//e, err = Get(e, scanner.Key.Id())
+		//if err != nil {
+		//	return err
+		//}
 	}
 	scanner.FieldValues[scanner.FieldName] = e
 	return
@@ -182,7 +182,7 @@ func (ref *ReferenceConverter) SetValue(e Persistable, column Column, value inte
 	}
 	v := reflect.ValueOf(value).Elem()
 	var k = reference.Kind()
-	for ; k != nil && k.Kind != ref.References.Kind; k = k.base {
+	for ; k != nil && k.Kind != ref.References.Kind; k = k.BaseKind {
 		v = v.FieldByIndex([]int{k.baseIndex})
 	}
 	if k == nil {

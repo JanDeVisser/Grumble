@@ -121,11 +121,21 @@ func (table *QueryTable) HasParent(parent Persistable) *QueryTable {
 
 // --------------------------------------------------------------------------
 
+type JoinDirection string
+
+const (
+	Referring  JoinDirection = "out"
+	Out                      = "out"
+	ReferredBy               = "in"
+	In                       = "in"
+)
+
 type JoinType string
 
 const (
 	Inner JoinType = "INNER"
 	Outer          = "LEFT"
+	Full           = "LEFT"
 	Right          = "INNER"
 	Left           = "LEFT"
 	Cross          = "CROSS"
@@ -133,8 +143,10 @@ const (
 
 type Join struct {
 	QueryTable
+	Direction JoinDirection
 	JoinType  JoinType
 	FieldName string
+	Reference bool
 }
 
 func (join Join) IsInnerJoin() bool {
@@ -142,6 +154,9 @@ func (join Join) IsInnerJoin() bool {
 }
 
 func (join Join) JoinClause() string {
+	if join.Direction == "" {
+		join.Direction = Referring
+	}
 	if join.JoinType == "" {
 		join.JoinType = Inner
 	}
@@ -150,7 +165,7 @@ func (join Join) JoinClause() string {
 	var column = "\"_parent\"[1]"
 	if !ok {
 		var c Column
-		if join.IsInnerJoin() {
+		if join.Direction == Referring {
 			c, ok = join.Query.Kind.ColumnByFieldName(join.FieldName)
 		} else {
 			c, ok = join.Kind.ColumnByFieldName(join.FieldName)
@@ -161,9 +176,11 @@ func (join Join) JoinClause() string {
 		column = fmt.Sprintf("%q", c.ColumnName)
 	}
 	if join.FieldName != "" {
-		alias1 := join.Alias
-		alias2 := join.Query.Alias
-		if !join.IsInnerJoin() {
+		var alias1, alias2 string
+		if join.Direction == Referring {
+			alias1 = join.Alias
+			alias2 = join.Query.Alias
+		} else {
 			alias1 = join.Query.Alias
 			alias2 = join.Alias
 		}
@@ -179,20 +196,9 @@ func (join Join) JoinClause() string {
 // --------------------------------------------------------------------------
 
 type Query struct {
-	pg *PostgreSQLAdapter
+	mgr *EntityManager
 	QueryTable
 	Joins []Join
-}
-
-func MakeQuery(obj interface{}) *Query {
-	kind := GetKind(obj)
-	if kind == nil {
-		panic(fmt.Sprintf("Cannot create query for '%v'", obj))
-	}
-	query := new(Query)
-	query.Kind = kind
-	query.Query = query
-	return query
 }
 
 func (query *Query) AddJoin(join Join) *Query {
@@ -219,7 +225,8 @@ func (query *Query) AddReferenceJoins() *Query {
 					GroupBy:     false,
 					WithDerived: true,
 				},
-				FieldName:  col.ColumnName,
+				FieldName: col.ColumnName,
+				Reference: true,
 			}
 			query.AddJoin(j)
 		}
@@ -348,8 +355,7 @@ func (query *Query) SQL() (s string, values []interface{}) {
 }
 
 func (query *Query) Execute() (ret [][]Persistable, err error) {
-	query.pg = GetPostgreSQLAdapter()
-	err = query.pg.TX(func(conn *sql.DB) (err error) {
+	err = query.mgr.TX(func(conn *sql.DB) (err error) {
 		sqlText, values := query.SQL()
 		rows, err := conn.Query(sqlText, values...)
 		if err != nil {
@@ -392,6 +398,8 @@ func (query *Query) ExecuteSingle(e Persistable) (ret Persistable, err error) {
 	default:
 		row := results[0]
 		ret = row[0]
+		e.SetKind(ret.Kind())
+		e.Initialize(ret.AsKey(), ret.Id())
 		if reflect.TypeOf(e) == reflect.TypeOf(ret) {
 			ret, err = Copy(ret, e)
 			if err != nil {
@@ -400,217 +408,4 @@ func (query *Query) ExecuteSingle(e Persistable) (ret Persistable, err error) {
 		}
 		return
 	}
-}
-
-// -- E N T I T Y S C A N N E R ---------------------------------------------
-
-type KindScanner struct {
-	Expects *Kind
-	kind    *Kind
-}
-
-func (scanner *KindScanner) Scan(value interface{}) (err error) {
-	switch k := value.(type) {
-	case string:
-		if k != "" {
-			kind := GetKind(k)
-			if kind == nil {
-				err = errors.New(fmt.Sprintf("Unknown kind '%s'", k))
-				return
-			}
-			if scanner.Expects != nil {
-				if !kind.DerivesFrom(scanner.Expects) {
-					err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'",
-						k, scanner.Expects.Kind))
-				}
-			}
-			scanner.kind = kind
-		} else {
-			scanner.kind = nil
-		}
-	case nil:
-		scanner.kind = nil
-	default:
-		err = errors.New(fmt.Sprintf("expected string entity kind, got '%v' (%T)", value, value))
-	}
-	return
-}
-
-type KeyScanner struct {
-	Expects *Kind
-	Key     *Key
-}
-
-func (scanner *KeyScanner) Scan(value interface{}) (err error) {
-	chain := ""
-	switch c := value.(type) {
-	case []uint8:
-		chain = string(c)
-	case string:
-		chain = c
-	case nil:
-		chain = ""
-	default:
-		err = errors.New(fmt.Sprintf("expected string key chain, got '%v' (%T)", value, value))
-	}
-	if err == nil {
-		scanner.Key, err = ParseKey(chain)
-		if scanner.Expects != nil && scanner.Key.Kind() != nil {
-			if !scanner.Key.Kind().DerivesFrom(scanner.Expects) {
-				err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'",
-					scanner.Key.Kind().Kind, scanner.Expects.Kind))
-			}
-		}
-	}
-	return
-}
-
-type IDScanner struct {
-	id int
-}
-
-func (scanner *IDScanner) Scan(value interface{}) (err error) {
-	switch id := value.(type) {
-	case int64:
-		scanner.id = int(id)
-	case nil:
-		scanner.id = 0
-	default:
-		err = errors.New(fmt.Sprintf("expected string entity parent, got '%q' (%T)", value, value))
-	}
-	return
-}
-
-type EntityScanner struct {
-	Query  *Query
-	Master *Scanners
-	Kind   *Kind
-	KindScanner
-	ParentScanner KeyScanner
-	IDScanner
-	SyntheticColumns []string
-	values           map[string]interface{}
-}
-
-func makeEntityScanner(query *Query, table *QueryTable) *EntityScanner {
-	ret := new(EntityScanner)
-	ret.Query = query
-	ret.Kind = table.Kind
-	if len(table.Computed) > 0 {
-		if ret.SyntheticColumns == nil {
-			ret.SyntheticColumns = make([]string, 0)
-		}
-		for _, computed := range table.Computed {
-			ret.SyntheticColumns = append(ret.SyntheticColumns, computed.Name)
-		}
-	}
-	if table.GroupBy {
-		if ret.SyntheticColumns == nil {
-			ret.SyntheticColumns = make([]string, 0)
-		}
-		for _, aggregated := range query.AggregatedTables() {
-			for _, agg := range aggregated.Aggregates {
-				ret.SyntheticColumns = append(ret.SyntheticColumns, agg.Name)
-			}
-		}
-	}
-	ret.values = make(map[string]interface{})
-	return ret
-}
-
-func (scanner *EntityScanner) SQLScanners(scanners []interface{}) (ret []interface{}, err error) {
-	scanners = append(scanners, &scanner.KindScanner, &scanner.ParentScanner, &scanner.IDScanner)
-	for _, column := range scanner.Kind.Columns {
-		scanners, err = column.Converter.Scanners(column, scanners, scanner.values)
-		if err != nil {
-			return
-		}
-	}
-	for _, synthetic := range scanner.SyntheticColumns {
-		scanners = append(scanners, &BasicScanner{FieldName: synthetic, FieldValues: scanner.values})
-	}
-	ret = scanners
-	return
-}
-
-func (scanner *EntityScanner) Build() (entity Persistable, err error) {
-	if scanner.kind == nil {
-		entity = ZeroKey
-		return
-	}
-	if !scanner.kind.DerivesFrom(scanner.Kind) {
-		err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'", scanner.kind.Kind, scanner.Kind.Kind))
-		return
-	}
-	entity, err = scanner.kind.Make(scanner.ParentScanner.Key, scanner.IDScanner.id)
-	if err != nil {
-		return
-	}
-	entity, err = Populate(entity, scanner.values)
-	if err != nil {
-		return
-	}
-	// Clear out values map for next round:
-	for name := range scanner.values {
-		delete(scanner.values, name)
-	}
-	return
-}
-
-// --------------------------------------------------------------------------
-
-type Scanners struct {
-	Query       *Query
-	Scanners    []*EntityScanner
-	sqlScanners []interface{}
-	references  map[string]int
-}
-
-func MakeScanners(query *Query) (ret *Scanners, err error) {
-	ret = new(Scanners)
-	ret.Query = query
-	ret.Scanners = make([]*EntityScanner, 1)
-	ret.references = make(map[string]int)
-	if t := query.GroupedBy(); t != nil {
-		ret.Scanners[0] = makeEntityScanner(ret.Query, t)
-	} else {
-		ret.Scanners[0] = makeEntityScanner(ret.Query, &query.QueryTable)
-		for _, join := range query.Joins {
-			ret.Scanners = append(ret.Scanners, makeEntityScanner(ret.Query, &join.QueryTable))
-			if join.JoinType == Inner {
-				ret.references[join.FieldName] = len(ret.Scanners) - 1
-			}
-		}
-	}
-	return
-}
-
-func (scanners *Scanners) SQLScanners() (ret []interface{}, err error) {
-	if scanners.sqlScanners == nil {
-		scanners.sqlScanners = make([]interface{}, 0)
-		for _, scanner := range scanners.Scanners {
-			scanners.sqlScanners, err = scanner.SQLScanners(scanners.sqlScanners)
-			if err != nil {
-				return
-			}
-		}
-	}
-	ret = scanners.sqlScanners
-	return
-}
-
-func (scanners *Scanners) Build() (ret []Persistable, err error) {
-	ret = make([]Persistable, 0)
-	for _, scanner := range scanners.Scanners {
-		e, err := scanner.Build()
-		if err != nil {
-			return nil, err
-		}
-		ret = append(ret, e)
-	}
-	e := ret[0]
-	for columnName, ix := range scanners.references {
-		e.SetField(columnName, ret[ix])
-	}
-	return
 }

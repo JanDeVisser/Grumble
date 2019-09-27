@@ -15,7 +15,7 @@ type Column struct {
 	FieldName   string
 	Index       []int
 	ColumnName  string
-	Formula		string
+	Formula     string
 	VerboseName string
 	IsKey       bool
 	Scoped      bool
@@ -32,7 +32,7 @@ type Kind struct {
 	columnsByName map[string]int
 	table         *SQLTable
 	typ           reflect.Type
-	base          *Kind
+	BaseKind      *Kind
 	baseIndex     int
 	derived       []*Kind
 }
@@ -216,8 +216,8 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 		}
 		switch {
 		case fld.Type.Kind() == reflect.Struct && (fld.Type.Name() == "Key" || fld.Type.Name() == "grumble/Key"):
-			if kind.base != nil {
-				panic(fmt.Sprintf("Kind '%s' can't embed Key directly and have a base Kind", kind.Kind))
+			if kind.BaseKind != nil {
+				panic(fmt.Sprintf("Kind '%s' can't embed Key directly and have a BaseKind Kind", kind.Kind))
 			}
 			kind.parseEntityTags(tags)
 			keyFound = true
@@ -225,11 +225,11 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 		case fld.Type.Kind() == reflect.Struct:
 			structKind := GetKind(fld.Type)
 			if structKind != nil {
-				if kind.base != nil {
+				if kind.BaseKind != nil {
 					panic(fmt.Sprintf("Kind '%s': Multiple inheritance not supported.", kind.Kind))
 				}
 				if keyFound {
-					panic(fmt.Sprintf("Kind '%s' can't embed Key directly and have a base Kind", kind.Kind))
+					panic(fmt.Sprintf("Kind '%s' can't embed Key directly and have a BaseKind Kind", kind.Kind))
 				}
 				kind.SetBaseKind(i, structKind, tags)
 				continue
@@ -258,7 +258,7 @@ func (k *Kind) addColumn(column Column) {
 
 func (k *Kind) SetBaseKind(index int, base *Kind, tags *Tags) {
 	k.parseEntityTags(tags)
-	k.base = base
+	k.BaseKind = base
 	k.baseIndex = index
 	base.AddDerivedKind(k)
 	for _, column := range base.Columns {
@@ -295,7 +295,7 @@ func (k *Kind) DerivedKinds() (ret []*Kind) {
 }
 
 func (k *Kind) DerivesFrom(base *Kind) bool {
-	for b := k; b != nil; b = b.base {
+	for b := k; b != nil; b = b.BaseKind {
 		if b.Kind == base.Kind {
 			return true
 		}
@@ -439,10 +439,4 @@ func (k *Kind) Make(parent *Key, id int) (entity Persistable, err error) {
 
 func (k *Kind) New(parent *Key) (entity Persistable, err error) {
 	return k.Make(parent, 0)
-}
-
-func (k *Kind) By(columnName string, value interface{}) (entity Persistable, err error) {
-	q := MakeQuery(k)
-	q.AddFilter(columnName, value)
-	return q.ExecuteSingle(nil)
 }

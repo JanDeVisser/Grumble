@@ -42,7 +42,7 @@ func buildKeyChain(chain []string) (ret *Key, err error) {
 		return
 	}
 
-	if k == "#zero#" {
+	if k == "" {
 		return ZeroKey, nil
 	}
 	kind := GetKind(k)
@@ -106,11 +106,12 @@ func (key *Key) Id() int {
 }
 
 func (key *Key) Self() (ret Persistable, err error) {
-	ret, err = key.Kind().Make(key.parent, key.Id())
-	if err != nil {
-		return
-	}
-	return Get(ret, key.Id())
+	return key.Kind().Make(key.parent, key.Id())
+	//ret, err = key.Kind().Make(key.parent, key.Id())
+	//if err != nil {
+	//	return
+	//}
+	//return Get(ret, key.Id())
 }
 
 func (key *Key) SyntheticField(name string) (ret interface{}, ok bool) {
@@ -137,7 +138,7 @@ func (key *Key) SetPopulated() {
 
 func (key *Key) String() string {
 	if key.IsZero() {
-		return "(\"#zero#\",0)"
+		return "(\"\",0)"
 	} else {
 		return fmt.Sprintf("(%s,%d)", key.Kind().Name(), key.id)
 	}
