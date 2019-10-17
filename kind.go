@@ -35,6 +35,7 @@ type Kind struct {
 	BaseKind      *Kind
 	baseIndex     int
 	derived       []*Kind
+	Transient     map[string][]int
 }
 
 func (k Kind) Basename() string {
@@ -42,17 +43,21 @@ func (k Kind) Basename() string {
 	return parts[len(parts)-1]
 }
 
-func (k *Kind) SQLTable() *SQLTable {
+func (k *Kind) SQLTable(pg *PostgreSQLAdapter) *SQLTable {
 	if k.table == nil {
-		pg := GetPostgreSQLAdapter()
+		if pg == nil {
+			pg = GetPostgreSQLAdapter()
+		}
 		table := pg.makeTable(k.TableName)
 		k.table = &table
+	} else if pg != nil {
+		k.table.pg = *pg
 	}
 	return k.table
 }
 
 func (k Kind) QualifiedTableName() string {
-	return k.SQLTable().QualifiedName()
+	return k.SQLTable(nil).QualifiedName()
 }
 
 func (k Kind) Name() string {
@@ -99,8 +104,29 @@ func (k *Kind) ColumnByFieldName(name string) (col Column, ok bool) {
 	return
 }
 
+func (k *Kind) Transients() []string {
+	ret := make([]string, 0)
+	for n, _ := range k.Transient {
+		ret = append(ret, n)
+	}
+	return ret
+}
+
+func (k *Kind) IsTransient(fld string) bool {
+	_, ok := k.Transient[fld]
+	return ok
+}
+
 var RegistryByType = make(map[reflect.Type]*Kind)
 var RegistryByKind = make(map[string]*Kind)
+
+func Kinds() []*Kind {
+	ret := make([]*Kind, 0)
+	for _, k := range RegistryByType {
+		ret = append(ret, k)
+	}
+	return ret
+}
 
 func probeKind(obj interface{}) (kind *Kind) {
 	v := reflect.ValueOf(obj)
@@ -138,7 +164,7 @@ func GetKind(obj interface{}) (kind *Kind) {
 func SetKind(e Persistable) *Kind {
 	k := GetKind(e)
 	e.SetKind(k)
-	if e.Parent() == nil {
+	if e.Parent() != nil {
 		e.Initialize(e.Parent(), e.Id())
 	}
 	return k
@@ -201,6 +227,7 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 	kind.Columns = make([]Column, 0)
 	kind.columnsByName = make(map[string]int)
 	kind.typ = t
+	kind.Transient = make(map[string][]int)
 	keyFound := false
 	RegistryByType[t] = kind
 	RegistryByKind[kind.Kind] = kind
@@ -212,6 +239,7 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 		}
 		tags := ParseTags(fld.Tag.Get("grumble"))
 		if transient, _ := tags.GetBool("transient"); transient {
+			kind.Transient[fld.Name] = []int{i}
 			continue
 		}
 		switch {
@@ -240,7 +268,7 @@ func createKind(t reflect.Type, obj interface{}) *Kind {
 		}
 	}
 	if DoReconcile {
-		if err := kind.reconcile(); err != nil {
+		if err := kind.Reconcile(nil); err != nil {
 			panic(err)
 		}
 	}
@@ -267,6 +295,12 @@ func (k *Kind) SetBaseKind(index int, base *Kind, tags *Tags) {
 		derivedColumn.Index[0] = index
 		derivedColumn.Index = append(derivedColumn.Index, column.Index...)
 		k.addColumn(derivedColumn)
+	}
+	for n, baseIndex := range base.Transient {
+		ix := make([]int, 1)
+		ix[0] = index
+		ix = append(ix, baseIndex...)
+		k.Transient[n] = ix
 	}
 }
 
@@ -379,37 +413,39 @@ var _idColumn = SQLColumn{Name: "_id", SQLType: "serial", Default: "", Nullable:
 var _parentColumn = SQLColumn{Name: "_parent", SQLType: "", Default: "", Nullable: true, PrimaryKey: false, Unique: false, Indexed: false}
 var _parentIndex = SQLIndex{Columns: []string{"_parent", "_id"}, PrimaryKey: false, Unique: true}
 
-func (k *Kind) reconcile() (err error) {
-	table := k.SQLTable()
-	if err = table.AddColumn(_idColumn); err != nil {
-		return
-	}
-	if _parentColumn.SQLType == "" {
-		_parentColumn.SQLType = fmt.Sprintf("%q.\"Reference\"[]", table.pg.Schema)
-	}
-	if err = table.AddColumn(_parentColumn); err != nil {
-		return
-	}
-	if err = table.AddIndex(_parentIndex); err != nil {
-		return
-	}
-	for _, col := range k.Columns {
-		if col.Formula == "" {
-			c := SQLColumn{}
-			c.Name = col.ColumnName
-			c.SQLType = col.Converter.SQLType(col)
-			if err = table.AddColumn(c); err != nil {
-				return
-			}
-			if col.IsKey {
-				keyCols := make([]string, 2)
-				if col.Scoped {
-					keyCols = append(keyCols, "_parent")
-				}
-				keyCols = append(keyCols, col.ColumnName)
-				index := SQLIndex{Columns: keyCols, PrimaryKey: false, Unique: true}
-				if err = table.AddIndex(index); err != nil {
+func (k *Kind) Reconcile(pg *PostgreSQLAdapter) (err error) {
+	table := k.SQLTable(pg)
+	if table.GetColumnByName(_idColumn.Name) == nil {
+		if err = table.AddColumn(_idColumn); err != nil {
+			return
+		}
+		if _parentColumn.SQLType == "" {
+			_parentColumn.SQLType = fmt.Sprintf("%q.\"Reference\"[]", table.pg.Schema)
+		}
+		if err = table.AddColumn(_parentColumn); err != nil {
+			return
+		}
+		if err = table.AddIndex(_parentIndex); err != nil {
+			return
+		}
+		for _, col := range k.Columns {
+			if col.Formula == "" {
+				c := SQLColumn{}
+				c.Name = col.ColumnName
+				c.SQLType = col.Converter.SQLType(col)
+				if err = table.AddColumn(c); err != nil {
 					return
+				}
+				if col.IsKey {
+					keyCols := make([]string, 2)
+					if col.Scoped {
+						keyCols = append(keyCols, "_parent")
+					}
+					keyCols = append(keyCols, col.ColumnName)
+					index := SQLIndex{Columns: keyCols, PrimaryKey: false, Unique: true}
+					if err = table.AddIndex(index); err != nil {
+						return
+					}
 				}
 			}
 		}

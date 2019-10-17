@@ -4,17 +4,20 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
 )
 
 type Persistable interface {
-	Initialize(*Key, int) *Key
+	Initialize(Persistable, int) *Key
 	SetKind(*Kind)
 	Kind() *Kind
 	Parent() *Key
 	AsKey() *Key
 	Id() int
 	Self() (Persistable, error)
+	SetManager(manager *EntityManager)
+	Manager() *EntityManager
 	Field(string) interface{}
 	SetField(string, interface{})
 	Populated() bool
@@ -78,34 +81,21 @@ func Copy(src, target Persistable) (ret Persistable, err error) {
 	target.Initialize(src.Parent(), src.Id())
 	sourceValue := reflect.ValueOf(srcP).Elem()
 	targetValue := reflect.ValueOf(targetP).Elem()
-	for _, col := range kind.Columns {
-		targetField := targetValue.FieldByIndex(col.Index)
+
+	copyVal := func(index []int) {
+		targetField := targetValue.FieldByIndex(index)
 		if targetField.IsValid() && targetField.CanSet() {
-			sourceField := sourceValue.FieldByIndex(col.Index)
+			sourceField := sourceValue.FieldByIndex(index)
 			targetField.Set(sourceField)
 		}
 	}
-	return target, nil
-}
-
-func CopyOriginal(src, target Persistable) (ret Persistable, err error) {
-	if target.Kind() == nil {
-		SetKind(target)
+	for _, col := range kind.Columns {
+		copyVal(col.Index)
 	}
-	tk := target.Kind()
-	sk := src.Kind()
-	target.Initialize(src.Parent(), src.Id())
-	sourceValue := reflect.ValueOf(src).Elem()
-	targetValue := reflect.ValueOf(target).Elem()
-	for _, tc := range tk.Columns {
-		targetField := targetValue.FieldByIndex(tc.Index)
-		if targetField.IsValid() && targetField.CanSet() {
-			if sc, ok := sk.Column(tc.ColumnName); ok {
-				sourceField := sourceValue.FieldByIndex(sc.Index)
-				targetField.Set(sourceField)
-			}
-		}
+	for _, index := range kind.Transient {
+		copyVal(index)
 	}
+	target.SetManager(src.Manager())
 	return target, nil
 }
 
@@ -151,23 +141,86 @@ func MakeEntityManager() (mgr *EntityManager, err error) {
 	return
 }
 
-func (mgr *EntityManager) Get(e Persistable, id int) (ret Persistable, err error) {
-	if id <= 0 {
-		err = errors.New("cannot Get() entity with ID less than or equal to zero")
-		return
-	}
-	query := mgr.MakeQuery(e)
-	query.AddCondition(HasId{Id: id})
-	query.AddReferenceJoins()
-	ret, err = query.ExecuteSingle(e)
-	if err != nil {
-		return
+func (mgr *EntityManager) Make(kind *Kind, parent *Key, id int) (entity Persistable, err error) {
+	entity, err = kind.Make(parent, id)
+	if entity != nil {
+		entity.SetManager(mgr)
 	}
 	return
 }
 
+func (mgr *EntityManager) New(kind *Kind, parent *Key) (entity Persistable, err error) {
+	return mgr.Make(kind, parent, 0)
+}
+
+func (mgr *EntityManager) Get(kind interface{}, id int) (ret Persistable, err error) {
+	if id <= 0 {
+		err = errors.New("cannot Get() entity with ID less than or equal to zero")
+		return
+	}
+	query := mgr.MakeQuery(kind)
+	query.AddCondition(HasId{Id: id})
+	query.AddReferenceJoins()
+
+	e, err := mgr.Make(query.Kind, nil, id)
+	if err != nil {
+		return
+	}
+	m := reflect.ValueOf(e).MethodByName("GetQuery")
+	if m.IsValid() {
+		qv := m.Call([]reflect.Value{reflect.ValueOf(query)})
+		query = qv[0].Interface().(*Query)
+	}
+	ret, err = query.ExecuteSingle(nil)
+	return
+}
+
+func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persistable, err error) {
+	query := mgr.MakeQuery(kind)
+	query.AddReferenceJoins()
+	e, err := mgr.Make(query.Kind, nil, 0)
+	if err != nil {
+		return
+	}
+	for _, col := range query.Kind.Columns {
+		if q.Get(col.FieldName) != "" {
+			query.AddFilter(col.ColumnName, q.Get(col.FieldName))
+		}
+	}
+	if q.Get("_parent") != "" {
+		var parent *Key
+		parent, err = ParseKey(q.Get("_parent"))
+		if err != nil {
+			return
+		}
+		query.AddCondition(&HasParent{Parent: parent})
+	}
+	if q.Get("joinparent") != "" {
+		query.AddParentJoin(q.Get("joinparent"))
+	}
+	m := reflect.ValueOf(e).MethodByName("ManyQuery")
+	if m.IsValid() {
+		qv := m.Call([]reflect.Value{reflect.ValueOf(query), reflect.ValueOf(q)})
+		query = qv[0].Interface().(*Query)
+	}
+	fmt.Printf("%s\n", query.SQLText())
+	ret, err = query.Execute()
+	return
+}
+
 func (mgr *EntityManager) Inflate(e Persistable) (err error) {
-	_, err = mgr.Get(e, e.Id())
+	SetKind(e)
+	ret, err := mgr.Get(e.Kind(), e.Id())
+	if ret != nil {
+		e.SetKind(ret.Kind())
+		e.Initialize(ret.AsKey(), ret.Id())
+		if reflect.TypeOf(e) == reflect.TypeOf(ret) {
+			_, err = Copy(ret, e)
+			if err != nil {
+				return
+			}
+		}
+	}
 	return
 }
 
@@ -238,7 +291,7 @@ func insert(e Persistable, conn *sql.DB) (err error) {
 	case err != nil:
 		return
 	}
-	e.Initialize(e.Parent(), id)
+	e.Initialize(nil, id)
 	e.SetPopulated()
 	return
 }
@@ -262,7 +315,7 @@ func (mgr *EntityManager) MakeQuery(kind interface{}) *Query {
 	query := new(Query)
 	query.Kind = k
 	query.Query = query
-	query.mgr = mgr
+	query.Manager = mgr
 	return query
 }
 

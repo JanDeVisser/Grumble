@@ -114,7 +114,7 @@ type EntityScanner struct {
 	values           map[string]interface{}
 }
 
-func makeEntityScanner(query *Query, table *QueryTable) *EntityScanner {
+func makeEntityScanner(query *Query, table *QueryTable, subQueries []SubQuery, extraComputed []Computed) *EntityScanner {
 	ret := new(EntityScanner)
 	ret.Query = query
 	ret.Kind = table.Kind
@@ -134,6 +134,24 @@ func makeEntityScanner(query *Query, table *QueryTable) *EntityScanner {
 			for _, agg := range aggregated.Aggregates {
 				ret.SyntheticColumns = append(ret.SyntheticColumns, agg.Name)
 			}
+		}
+	}
+	if len(subQueries) > 0 {
+		if ret.SyntheticColumns == nil {
+			ret.SyntheticColumns = make([]string, 0)
+		}
+		for _, sq := range subQueries {
+			for _, ss := range sq.SubSelects {
+				ret.SyntheticColumns = append(ret.SyntheticColumns, ss.Name)
+			}
+		}
+	}
+	if len(extraComputed) > 0 {
+		if ret.SyntheticColumns == nil {
+			ret.SyntheticColumns = make([]string, 0)
+		}
+		for _, computed := range extraComputed {
+			ret.SyntheticColumns = append(ret.SyntheticColumns, computed.Name)
 		}
 	}
 	ret.values = make(map[string]interface{})
@@ -164,7 +182,7 @@ func (scanner *EntityScanner) Build() (entity Persistable, err error) {
 		err = errors.New(fmt.Sprintf("kind '%s' does not derive from '%s'", scanner.kind.Kind, scanner.Kind.Kind))
 		return
 	}
-	entity, err = scanner.kind.Make(scanner.ParentScanner.Key, scanner.IDScanner.id)
+	entity, err = scanner.Query.Manager.Make(scanner.kind, scanner.ParentScanner.Key, scanner.IDScanner.id)
 	if err != nil {
 		return
 	}
@@ -194,11 +212,11 @@ func MakeScanners(query *Query) (ret *Scanners, err error) {
 	ret.Scanners = make([]*EntityScanner, 1)
 	ret.references = make(map[string]int)
 	if t := query.GroupedBy(); t != nil {
-		ret.Scanners[0] = makeEntityScanner(ret.Query, t)
+		ret.Scanners[0] = makeEntityScanner(ret.Query, t, query.SubQueries, query.GlobalComputed)
 	} else {
-		ret.Scanners[0] = makeEntityScanner(ret.Query, &query.QueryTable)
+		ret.Scanners[0] = makeEntityScanner(ret.Query, &query.QueryTable, query.SubQueries, query.GlobalComputed)
 		for _, join := range query.Joins {
-			ret.Scanners = append(ret.Scanners, makeEntityScanner(ret.Query, &join.QueryTable))
+			ret.Scanners = append(ret.Scanners, makeEntityScanner(ret.Query, &join.QueryTable, nil, nil))
 			if join.Reference {
 				ret.references[join.FieldName] = len(ret.Scanners) - 1
 			}
@@ -236,11 +254,12 @@ func (scanners *Scanners) Build() (ret []Persistable, err error) {
 		ref := ret[ix]
 		if ref.AsKey().IsZero() {
 			ref = nil
-		}
-		col, ok := kind.Column(columnName)
-		if ok {
-			k := col.Converter.(*ReferenceConverter).References
-			SetField(e, columnName, CastTo(ref, k))
+		} else {
+			col, ok := kind.Column(columnName)
+			if ok {
+				k := col.Converter.(*ReferenceConverter).References
+				SetField(e, columnName, CastTo(ref, k))
+			}
 		}
 	}
 	return

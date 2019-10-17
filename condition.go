@@ -8,7 +8,7 @@ import (
 // --------------------------------------------------------------------------
 
 type Condition interface {
-	WhereClause(string) string
+	WhereClause(*Query, bool) string
 	Values([]interface{}) []interface{}
 }
 
@@ -19,8 +19,12 @@ type SimpleCondition struct {
 	ParameterValues []interface{}
 }
 
-func (cond SimpleCondition) WhereClause(alias string) string {
-	return cond.SQL
+func (cond SimpleCondition) WhereClause(query *Query, queryConstraint bool) string {
+	alias := ""
+	if queryConstraint {
+		alias = query.Alias + "."
+	}
+	return strings.ReplaceAll(cond.SQL, "__alias__.", alias)
 }
 
 func (cond SimpleCondition) Values(values []interface{}) []interface{} {
@@ -35,9 +39,13 @@ type Predicate struct {
 	Value      interface{}
 }
 
-func (cond Predicate) WhereClause(alias string) string {
+func (cond Predicate) WhereClause(query *Query, queryConstraint bool) string {
+	alias := ""
+	if queryConstraint {
+		alias = query.Alias + "."
+	}
 	return fmt.Sprintf("%s %s __count__",
-		strings.ReplaceAll(cond.Expression, "__alias__", alias), cond.Operator)
+		strings.ReplaceAll(cond.Expression, "__alias__.", alias), cond.Operator)
 }
 
 func (cond Predicate) Values(values []interface{}) []interface{} {
@@ -50,8 +58,12 @@ type HasId struct {
 	Id int
 }
 
-func (cond HasId) WhereClause(alias string) string {
-	return fmt.Sprintf("%s.\"_id\" = __count__", alias)
+func (cond HasId) WhereClause(query *Query, queryConstraint bool) string {
+	alias := ""
+	if queryConstraint {
+		alias = query.Alias + "."
+	}
+	return fmt.Sprintf("%s\"_id\" = __count__", alias)
 }
 
 func (cond HasId) Values(values []interface{}) []interface{} {
@@ -64,15 +76,18 @@ type HasParent struct {
 	Parent *Key
 }
 
-func (cond HasParent) WhereClause(alias string) string {
+func (cond HasParent) WhereClause(query *Query, queryConstraint bool) string {
 	if cond.Parent == nil {
 		cond.Parent = ZeroKey
 	}
+	alias := ""
+	if queryConstraint {
+		alias = query.Alias + "."
+	}
 	if cond.Parent.IsZero() {
-		return fmt.Sprintf("cardinality(%s.\"_parent\") = 0", alias)
+		return fmt.Sprintf("cardinality(%s\"_parent\") = 0", alias)
 	} else {
-		pg := GetPostgreSQLAdapter()
-		return fmt.Sprintf("%s.\"_parent\"[1] = __count__::%s.\"Reference\"", alias, pg.Schema)
+		return fmt.Sprintf("%s\"_parent\"[1] = __count__::%s.\"Reference\"", alias, query.Manager.Schema)
 	}
 }
 
@@ -93,10 +108,13 @@ type HasAncestor struct {
 	Ancestor *Key
 }
 
-func (cond HasAncestor) WhereClause(alias string) string {
+func (cond HasAncestor) WhereClause(query *Query, queryConstraint bool) string {
+	alias := ""
+	if queryConstraint {
+		alias = query.Alias + "."
+	}
 	if cond.Ancestor != nil && !cond.Ancestor.IsZero() {
-		pg := GetPostgreSQLAdapter()
-		return fmt.Sprintf("__count__::%s.\"Reference\" = ANY(%s.\"_parent\")", pg.Schema, alias)
+		return fmt.Sprintf("__count__::%s.\"Reference\" = ANY(%s\"_parent\")", query.Manager.Schema, alias)
 	} else {
 		return "1 = 1"
 	}
@@ -117,15 +135,18 @@ type References struct {
 	References *Key
 }
 
-func (cond References) WhereClause(alias string) string {
+func (cond References) WhereClause(query *Query, queryConstraint bool) string {
 	if cond.References == nil {
 		cond.References = ZeroKey
 	}
+	alias := ""
+	if queryConstraint {
+		alias = query.Alias + "."
+	}
 	if cond.References.IsZero() {
-		return fmt.Sprintf("%s.%q IS NULL", alias, cond.Column)
+		return fmt.Sprintf("%s%q IS NULL", alias, cond.Column)
 	} else {
-		pg := GetPostgreSQLAdapter()
-		return fmt.Sprintf("%s.%q = __count__::%s.\"Reference\"", alias, cond.Column, pg.Schema)
+		return fmt.Sprintf("%s%q = __count__::%s.\"Reference\"", alias, cond.Column, query.Manager.Schema)
 	}
 }
 
@@ -154,10 +175,10 @@ func (compound *CompoundCondition) AddCondition(cond Condition) Condition {
 	return compound
 }
 
-func (compound CompoundCondition) WhereClause(alias string) string {
+func (compound CompoundCondition) WhereClause(query *Query, queryConstraint bool) string {
 	conditions := make([]string, len(compound.Conditions))
 	for ix, c := range compound.Conditions {
-		conditions[ix] = "(" + c.WhereClause(alias) + ")"
+		conditions[ix] = "(" + c.WhereClause(query, queryConstraint) + ")"
 	}
 	return strings.Join(conditions, " AND ")
 }

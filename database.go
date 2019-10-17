@@ -10,10 +10,10 @@ import (
 	_ "github.com/lib/pq"
 	"io/ioutil"
 	"log"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"text/template"
 )
 
@@ -34,7 +34,6 @@ type PostgreSQLAdapter struct {
 	tx            map[*sql.DB]*sql.Tx
 }
 
-var once sync.Once
 var defaultAdapter = PostgreSQLAdapter{
 	Hostname:      "localhost",
 	Username:      "grumble",
@@ -143,25 +142,27 @@ func (tmpl SQLTemplate) Exec(conn *sql.DB, data interface{}, values ...interface
 	return
 }
 
-func GetPostgreSQLAdapter() *PostgreSQLAdapter {
-	once.Do(func() {
-		adapter = &defaultAdapter
-		var err error
+func init() {
+	var err error
 
-		var jsonText []byte
-		if jsonText, err = ioutil.ReadFile("conf/database.conf"); err != nil {
-			return
-		}
+	adapter = &defaultAdapter
+	var jsonText []byte
+	if jsonText, err = ioutil.ReadFile("conf/database.conf"); err == nil {
 		adapter = new(PostgreSQLAdapter)
 		err = json.Unmarshal(jsonText, adapter)
 		if err != nil {
-			log.Printf("Error decoding database.conf: %s\n", err.Error())
+			_, _ = fmt.Fprintf(os.Stderr, "Could not JSON decode database config: %s", err)
 			adapter = &defaultAdapter
 		}
 		adapter.conn = make(map[bool]*sql.DB)
 		adapter.tx = make(map[*sql.DB]*sql.Tx)
-		adapter.initialize()
-	})
+	} else {
+		_, _ = fmt.Fprintf(os.Stderr, "Could not read database config: %s", err)
+	}
+	adapter.initialize()
+}
+
+func GetPostgreSQLAdapter() *PostgreSQLAdapter {
 	ret := new(PostgreSQLAdapter)
 	*ret = *adapter
 	ret.conn = make(map[bool]*sql.DB)

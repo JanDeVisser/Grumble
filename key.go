@@ -11,14 +11,15 @@ import (
 type Key struct {
 	kind      *Kind
 	parent    *Key
-	id        int
+	Ident     int
 	populated bool
 	synthetic map[string]interface{}
+	mgr       *EntityManager
 }
 
 // -- F A C T O R Y  M E T H O D S ------------------------------------------
 
-var ZeroKey = &Key{parent: nil, kind: nil, id: 0}
+var ZeroKey = &Key{parent: nil, kind: nil, Ident: 0}
 
 func CreateKey(parent *Key, kind *Kind, id int) (*Key, error) {
 	ret := new(Key)
@@ -27,34 +28,44 @@ func CreateKey(parent *Key, kind *Kind, id int) (*Key, error) {
 	}
 	ret.parent = parent
 	ret.kind = kind
-	ret.id = id
+	ret.Ident = id
 	return ret, nil
 }
 
 func buildKeyChain(chain []string) (ret *Key, err error) {
-	if len(chain) < 2 {
+	if len(chain) == 0 {
+		err = errors.New("key chain is empty")
 		return
 	}
-	k := chain[len(chain)-2]
-	i := chain[len(chain)-1]
-	p, err := buildKeyChain(chain[:len(chain)-2])
-	if err != nil {
+	keys := len(chain) / 2
+	if keys*2 != len(chain) {
+		err = errors.New(fmt.Sprintf("key chain '%s' has an odd number of entries", strings.Join(chain, ",")))
 		return
 	}
+	ret = ZeroKey
+	for i := keys - 1; i >= 0; i-- {
+		k := chain[i*2]
+		i := chain[i*2+1]
 
-	if k == "" {
-		return ZeroKey, nil
+		if k == "" {
+			ret = ZeroKey
+			continue
+		}
+		kind := GetKind(k)
+		if kind == nil {
+			err = errors.New(fmt.Sprintf("kind '%s' does not exist", k))
+			return
+		}
+		var id int64
+		id, err = strconv.ParseInt(i, 0, 0)
+		if err != nil {
+			return
+		}
+		ret, err = CreateKey(ret, kind, int(id))
+		if err != nil {
+			return
+		}
 	}
-	kind := GetKind(k)
-	if kind == nil {
-		err = errors.New(fmt.Sprintf("kind '%s' does not exist", k))
-		return
-	}
-	id, err := strconv.ParseInt(i, 0, 0)
-	if err != nil {
-		return
-	}
-	ret, err = CreateKey(p, kind, int(id))
 	return
 }
 
@@ -69,12 +80,12 @@ func ParseKey(key string) (*Key, error) {
 
 // -- P E R S I S T A B L E  I M P L E M E N T A T I O N --------------------
 
-func (key *Key) Initialize(parent *Key, id int) *Key {
-	if parent == nil {
-		parent = ZeroKey
+func (key *Key) Initialize(parent Persistable, id int) *Key {
+	if parent != nil {
+		key.parent = parent.AsKey()
+		key.mgr = parent.Manager()
 	}
-	key.parent = parent
-	key.id = id
+	key.Ident = id
 	return key
 }
 
@@ -86,27 +97,42 @@ func (key *Key) SetKind(k *Kind) {
 }
 
 func (key *Key) Kind() *Kind {
+	if key == nil {
+		return nil
+	}
 	return key.kind
 }
 
 func (key *Key) Parent() *Key {
+	if key == nil {
+		return nil
+	}
 	return key.parent
 }
 
 func (key *Key) AsKey() *Key {
+	if key == nil {
+		return nil
+	}
 	return key
 }
 
 func (key *Key) IsZero() bool {
+	if key == nil {
+		return false
+	}
 	return key.kind == nil
 }
 
 func (key *Key) Id() int {
-	return key.id
+	if key == nil {
+		return 0
+	}
+	return key.Ident
 }
 
 func (key *Key) Self() (ret Persistable, err error) {
-	return key.Kind().Make(key.parent, key.Id())
+	return key.mgr.Make(key.Kind(), key.parent, key.Id())
 	//ret, err = key.Kind().Make(key.parent, key.Id())
 	//if err != nil {
 	//	return
@@ -140,7 +166,7 @@ func (key *Key) String() string {
 	if key.IsZero() {
 		return "(\"\",0)"
 	} else {
-		return fmt.Sprintf("(%s,%d)", key.Kind().Name(), key.id)
+		return fmt.Sprintf("(%s,%d)", key.Kind().Name(), key.Ident)
 	}
 }
 
@@ -150,6 +176,17 @@ func (key *Key) Chain() string {
 		keys = append(keys, fmt.Sprintf("%q", k))
 	}
 	return fmt.Sprintf("{%s}", strings.Join(keys, ","))
+}
+
+func (key *Key) SetManager(mgr *EntityManager) {
+	key.mgr = mgr
+}
+
+func (key *Key) Manager() *EntityManager {
+	if key == nil {
+		return nil
+	}
+	return key.mgr
 }
 
 func (key *Key) Field(fieldName string) interface{} {

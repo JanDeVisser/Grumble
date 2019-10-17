@@ -235,7 +235,7 @@ func TestNewEntityNoParent(t *testing.T) {
 	if k == nil {
 		t.Fatal("Can't get Kind")
 	}
-	e, err := k.Make(nil, SampleId)
+	e, err := mgr.Make(k, nil, SampleId)
 	if err != nil {
 		t.Fatalf("Can't create entity: %s", err)
 	}
@@ -263,10 +263,28 @@ func TestPut_insert(t *testing.T) {
 }
 
 func TestGet_1(t *testing.T) {
-	squash := &Product{}
-	_, err := mgr.Get(squash, SquashID)
+	e, err := mgr.Get(&Product{}, SquashID)
 	if err != nil {
-		t.Fatalf("Could not Get(%d): %s", SquashID, err)
+		t.Fatalf("Could not Get(Product:%d): %s", SquashID, err)
+	}
+	squash, ok := e.(*Product)
+	if !ok {
+		t.Fatalf("Could not cast Persistable %s:%d to Product", e.Kind().Kind, e.Id())
+	}
+	if squash.Kind().Kind != ProductKind {
+		t.Errorf("Entity does not have proper Kind after Get: '%s' != '%s'", squash.Kind().Kind, ProductKind)
+	}
+	if !CompareFloats(squash.Price, SquashPrice) {
+		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SquashPrice)
+	}
+}
+
+func TestInflate(t *testing.T) {
+	squash := &Product{}
+	squash.Initialize(nil, SquashID)
+	err := mgr.Inflate(squash)
+	if err != nil {
+		t.Fatalf("Could not Inflate: %s", err)
 	}
 	if squash.Kind().Kind != ProductKind {
 		t.Errorf("Entity does not have proper Kind after Get: '%s' != '%s'", squash.Kind().Kind, ProductKind)
@@ -278,9 +296,10 @@ func TestGet_1(t *testing.T) {
 
 func TestPut_update(t *testing.T) {
 	squash := &Product{}
-	_, err := mgr.Get(squash, SquashID)
+	squash.Initialize(nil, SquashID)
+	err := mgr.Inflate(squash)
 	if err != nil {
-		t.Fatalf("Could not Get(%d): %s", SquashID, err)
+		t.Fatalf("Could not Inflate: %s", err)
 	}
 	squash.Price = SquashPriceNew
 	if err := mgr.Put(squash); err != nil {
@@ -288,11 +307,12 @@ func TestPut_update(t *testing.T) {
 	}
 }
 
-func TestGet_2(t *testing.T) {
+func TestInflate_2(t *testing.T) {
 	squash := &Product{}
-	_, err := mgr.Get(squash, SquashID)
+	squash.Initialize(nil, SquashID)
+	err := mgr.Inflate(squash)
 	if err != nil {
-		t.Fatalf("Could not Get(%d): %s", SquashID, err)
+		t.Fatalf("Could not Inflate: %s", err)
 	}
 	if !CompareFloats(squash.Price, SquashPriceNew) {
 		t.Fatalf("Entity's fields not restored properly: %f != %f", squash.Price, SquashPriceNew)
