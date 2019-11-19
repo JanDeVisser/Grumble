@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"strconv"
+	"strings"
 )
 
 type Persistable interface {
@@ -18,27 +20,65 @@ type Persistable interface {
 	Self() (Persistable, error)
 	SetManager(manager *EntityManager)
 	Manager() *EntityManager
-	Field(string) interface{}
-	SetField(string, interface{})
 	Populated() bool
 	SetPopulated()
 	SyntheticField(string) (interface{}, bool)
-	SetSyntheticField(string, interface{})
+	SetSyntheticField(string, interface{}) bool
+	SyntheticFields() map[string]interface{}
 }
 
 // --------------------------------------------------------------------------
 
-func SetField(e Persistable, fieldName string, value interface{}) (ok bool) {
+func Label(e Persistable) string {
+	k := e.Kind()
+	if k.LabelCol == "" {
+		return e.AsKey().String()
+	} else {
+		if val, ok := Field(e, k.LabelCol); ok {
+			return fmt.Sprintf("%v", val)
+		} else {
+			return e.AsKey().String()
+		}
+	}
+}
+
+func Field(e Persistable, fieldName string) (ret interface{}, ok bool) {
 	col, ok := e.Kind().Column(fieldName)
 	if !ok {
 		return
 	}
 	v := reflect.ValueOf(e).Elem()
 	fld := v.FieldByIndex(col.Index)
+	if fld.IsValid() && fld.CanInterface() {
+		ret = fld.Interface()
+	}
+	return
+}
+
+func SetField(e Persistable, fieldName string, value interface{}) (ok bool) {
+	col, ok := e.Kind().Column(fieldName)
+	if !ok {
+		return e.SetSyntheticField(fieldName, value)
+	}
+	v := reflect.ValueOf(e).Elem()
+	fld := v.FieldByIndex(col.Index)
 	if fld.IsValid() && fld.CanSet() {
 		fld.Set(reflect.ValueOf(value))
 	}
-	return
+	return true
+}
+
+func SetFields(e Persistable, values map[string]interface{}) {
+	v := reflect.ValueOf(e).Elem()
+	for name, value := range values {
+		col, ok := e.Kind().Column(strings.ToTitle(name))
+		if ok {
+			fld := v.FieldByIndex(col.Index)
+			if fld.IsValid() && fld.CanSet() {
+				fld.Set(reflect.ValueOf(value))
+			}
+		}
+	}
 }
 
 func CastTo(e Persistable, kind *Kind) Persistable {
@@ -172,19 +212,46 @@ func (mgr *EntityManager) Get(kind interface{}, id int) (ret Persistable, err er
 		query = qv[0].Interface().(*Query)
 	}
 	ret, err = query.ExecuteSingle(nil)
+	if err != nil {
+		return
+	}
+	if ret != nil {
+		m = reflect.ValueOf(ret).MethodByName("OnGet")
+		if m.IsValid() {
+			v := m.Call([]reflect.Value{})
+			if !v[1].IsNil() {
+				err = v[1].Interface().(error)
+				return
+			}
+			ret = v[0].Interface().(Persistable)
+		}
+	}
 	return
 }
 
 func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persistable, err error) {
 	query := mgr.MakeQuery(kind)
-	query.AddReferenceJoins()
 	e, err := mgr.Make(query.Kind, nil, 0)
 	if err != nil {
 		return
 	}
 	for _, col := range query.Kind.Columns {
 		if q.Get(col.FieldName) != "" {
-			query.AddFilter(col.ColumnName, q.Get(col.FieldName))
+			refConv, ok := col.Converter.(*ReferenceConverter)
+			if ok {
+				var id int64
+				id, err = strconv.ParseInt(q.Get(col.FieldName), 0, 0)
+				if err != nil {
+					return
+				}
+				k, _ := CreateKey(nil, GetKind(refConv.References), int(id))
+				query.AddCondition(References{
+					Column:     col.FieldName,
+					References: k,
+				})
+			} else {
+				query.AddFilter(col.ColumnName, q.Get(col.FieldName))
+			}
 		}
 	}
 	if q.Get("_parent") != "" {
@@ -195,15 +262,39 @@ func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persist
 		}
 		query.AddCondition(&HasParent{Parent: parent})
 	}
-	if q.Get("joinparent") != "" {
-		query.AddParentJoin(q.Get("joinparent"))
+	if q.Get("_sort") != "" {
+		for _, sortorder := range strings.Split(q.Get("_sort"), ";") {
+			s := strings.Split(sortorder, ":")
+			col := s[0]
+			dir := Ascending
+			if (len(s) > 1) && (strings.Index(":ASC:DESC:", strings.ToUpper(s[1])) >= 0) {
+				dir = SortOrder(s[1])
+			}
+			query.AddSort(Sort{Column: col, Direction: dir})
+		}
 	}
+	if q.Get("joinparent") != "" {
+		pkind := q.Get("joinparent")
+		query.AddParentJoin(pkind)
+		if q.Get(pkind) != "" {
+			var parent Persistable
+			var id64 int64
+			if id64, err = strconv.ParseInt(q.Get(pkind), 0, 0); err != nil {
+				return
+			}
+			if parent, err = mgr.Get(pkind, int(id64)); err != nil {
+				return
+			}
+			query.AddCondition(&HasParent{Parent: parent.AsKey()})
+		}
+	}
+	query.AddReferenceJoins()
 	m := reflect.ValueOf(e).MethodByName("ManyQuery")
 	if m.IsValid() {
 		qv := m.Call([]reflect.Value{reflect.ValueOf(query), reflect.ValueOf(q)})
 		query = qv[0].Interface().(*Query)
 	}
-	fmt.Printf("%s\n", query.SQLText())
+	//log.Printf("%s\n", query.SQLText())
 	ret, err = query.Execute()
 	return
 }
@@ -225,7 +316,7 @@ func (mgr *EntityManager) Inflate(e Persistable) (err error) {
 }
 
 var updateEntity = SQLTemplate{Name: "UpdateEntity", SQL: `UPDATE {{.QualifiedTableName}}
-	SET {{range $i, $c := .Columns}}{{if gt $i 0}},{{end}} {{if not .Formula}}"{{$c.ColumnName}}" = {{$c.Converter.SQLTextOut .}}{{end}}{{end}}
+	SET {{range $i, $c := .Columns}}{{if not .Formula}}{{if gt $i 0}},{{end}} "{{$c.ColumnName}}" = {{$c.Converter.SQLTextOut .}}{{end}}{{end}}
 	WHERE "_id" = __count__
 `}
 
@@ -320,7 +411,38 @@ func (mgr *EntityManager) MakeQuery(kind interface{}) *Query {
 }
 
 func (mgr *EntityManager) By(kind interface{}, columnName string, value interface{}) (entity Persistable, err error) {
+	return mgr.ByColumnAndParent(kind, nil, columnName, value)
+}
+
+func (mgr *EntityManager) ByColumnAndParent(kind interface{}, parent *Key, columnName string, value interface{}) (entity Persistable, err error) {
 	q := mgr.MakeQuery(kind)
+	if parent != nil {
+		q.AddCondition(HasParent{Parent: parent})
+	}
 	q.AddFilter(columnName, value)
 	return q.ExecuteSingle(nil)
+}
+
+func (mgr *EntityManager) FindOrCreate(kind interface{}, parent *Key, field string, value string) (e Persistable, err error) {
+	k := GetKind(kind)
+	e, err = mgr.ByColumnAndParent(k, parent, field, value)
+	if err != nil {
+		err = errors.New(fmt.Sprintf("ByColumnAndParent(%q, %q = %q): %s", parent.String(), field, value, err))
+		return
+	}
+	if e == nil {
+		e, err = mgr.Make(k, parent, 0)
+		if err != nil {
+			return nil, err
+		}
+		if !SetField(e, field, value) {
+			err = errors.New(fmt.Sprintf("could not set field %q on entity of kind %q", field, k.Kind))
+			return nil, err
+		}
+		err = mgr.Put(e)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return
 }

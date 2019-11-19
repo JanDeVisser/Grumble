@@ -3,7 +3,6 @@ package grumble
 import (
 	"errors"
 	"fmt"
-	"reflect"
 	"strconv"
 	"strings"
 )
@@ -83,7 +82,9 @@ func ParseKey(key string) (*Key, error) {
 func (key *Key) Initialize(parent Persistable, id int) *Key {
 	if parent != nil {
 		key.parent = parent.AsKey()
-		key.mgr = parent.Manager()
+		if key.mgr == nil && parent.Manager() != nil {
+			key.mgr = parent.Manager()
+		}
 	}
 	key.Ident = id
 	return key
@@ -141,15 +142,26 @@ func (key *Key) Self() (ret Persistable, err error) {
 }
 
 func (key *Key) SyntheticField(name string) (ret interface{}, ok bool) {
+	if key.synthetic == nil {
+		return
+	}
 	ret, ok = key.synthetic[name]
 	return
 }
 
-func (key *Key) SetSyntheticField(name string, value interface{}) {
+func (key *Key) SetSyntheticField(name string, value interface{}) (ok bool) {
 	if key.synthetic == nil {
 		key.synthetic = make(map[string]interface{})
 	}
 	key.synthetic[name] = value
+	return true
+}
+
+func (key *Key) SyntheticFields() map[string]interface{} {
+	if key.synthetic == nil {
+		key.synthetic = make(map[string]interface{})
+	}
+	return key.synthetic
 }
 
 func (key *Key) Populated() bool {
@@ -187,41 +199,4 @@ func (key *Key) Manager() *EntityManager {
 		return nil
 	}
 	return key.mgr
-}
-
-func (key *Key) Field(fieldName string) interface{} {
-	v := reflect.ValueOf(key).Elem()
-	if v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
-		v = v.Elem()
-	}
-	fld := v.FieldByNameFunc(func(s string) bool {
-		return strings.ToLower(s) == strings.ToLower(fieldName)
-	})
-	if fld.IsValid() && fld.CanInterface() {
-		return fld.Interface()
-	} else {
-		return nil
-	}
-}
-
-func (key *Key) SetField(fieldName string, value interface{}) {
-	v := reflect.ValueOf(key)
-	if v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
-		v = v.Elem()
-	}
-	fld := v.FieldByNameFunc(func(s string) bool {
-		return strings.ToLower(s) == strings.ToLower(fieldName)
-	})
-	if fld.IsValid() {
-		fld.Set(reflect.ValueOf(value))
-	}
-}
-
-func (key *Key) Label() string {
-	k := key.Kind()
-	if k.LabelCol == "" {
-		return key.String()
-	} else {
-		return fmt.Sprintf("%v", key.Field(k.LabelCol))
-	}
 }

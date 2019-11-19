@@ -241,24 +241,32 @@ func (scanners *Scanners) SQLScanners() (ret []interface{}, err error) {
 
 func (scanners *Scanners) Build() (ret []Persistable, err error) {
 	ret = make([]Persistable, 0)
+	var e Persistable
 	for _, scanner := range scanners.Scanners {
-		e, err := scanner.Build()
+		e, err = scanner.Build()
 		if err != nil {
-			return nil, err
+			return
 		}
 		ret = append(ret, e)
 	}
-	e := ret[0]
+	e = ret[0]
 	kind := e.Kind()
 	for columnName, ix := range scanners.references {
 		ref := ret[ix]
 		if ref.AsKey().IsZero() {
 			ref = nil
+		}
+		col, ok := kind.Column(columnName)
+		if ok {
+			k := col.Converter.(*ReferenceConverter).References
+			if ref != nil {
+				ref = CastTo(ref, k)
+			}
+			SetField(e, columnName, ref)
 		} else {
-			col, ok := kind.Column(columnName)
-			if ok {
-				k := col.Converter.(*ReferenceConverter).References
-				SetField(e, columnName, CastTo(ref, k))
+			if !e.SetSyntheticField(columnName, ref) {
+				err = errors.New(fmt.Sprintf("could not set %q synthetic field in query result", columnName))
+				return
 			}
 		}
 	}
