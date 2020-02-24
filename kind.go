@@ -35,6 +35,7 @@ type Kind struct {
 	BaseKind      *Kind
 	baseIndex     int
 	derived       []*Kind
+	ParentKind    *Kind
 	Transient     map[string][]int
 }
 
@@ -289,6 +290,9 @@ func (k *Kind) SetBaseKind(index int, base *Kind, tags *Tags) {
 	k.BaseKind = base
 	k.baseIndex = index
 	base.AddDerivedKind(k)
+	if k.ParentKind == nil {
+		k.ParentKind = base.ParentKind
+	}
 	for _, column := range base.Columns {
 		derivedColumn := column
 		derivedColumn.Index = make([]int, 1)
@@ -347,6 +351,9 @@ func (k *Kind) parseEntityTags(tags *Tags) {
 	if tags.Has("verbosename") {
 		k.VerboseName = tags.Get("verbosename")
 	}
+	if tags.Has("parentkind") {
+		k.ParentKind = getKindForKind(tags.Get("parentkind"))
+	}
 }
 
 func (k *Kind) GetConverter(field reflect.StructField, tags *Tags) (converter Converter) {
@@ -363,10 +370,8 @@ func (k *Kind) GetConverter(field reflect.StructField, tags *Tags) (converter Co
 		converter = adapt.Converter(field, tags)
 	case taggedType != "":
 		converter = &BasicConverter{taggedType}
-	case ConvertersForType[field.Type] != nil:
-		converter = ConvertersForType[field.Type]
 	default:
-		converter = ConvertersForKind[field.Type.Kind()]
+		converter = GetConverterForType(field.Type)
 	}
 	return converter
 }

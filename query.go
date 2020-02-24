@@ -316,6 +316,7 @@ func (query *Query) AddParentJoin(kind interface{}) *Query {
 	j := Join{
 		QueryTable: QueryTable{
 			Kind:        k,
+			Alias:       "parent",
 			GroupBy:     false,
 			WithDerived: true,
 		},

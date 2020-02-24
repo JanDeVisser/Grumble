@@ -27,6 +27,22 @@ type Persistable interface {
 	SyntheticFields() map[string]interface{}
 }
 
+type GetQueryProcessor interface {
+	GetQuery(query *Query) (ret *Query)
+}
+
+type GetResultProcessor interface {
+	OnGet() (ret Persistable, err error)
+}
+
+type ManyQueryProcessor interface {
+	ManyQuery(query *Query, values url.Values) (ret *Query)
+}
+
+type QueryResultsProcessor interface {
+	ProcessQueryResults(results [][]Persistable) (ret [][]Persistable, err error)
+}
+
 // --------------------------------------------------------------------------
 
 func Label(e Persistable) string {
@@ -165,7 +181,58 @@ func Populate(e Persistable, values map[string]interface{}) (ret Persistable, er
 		}
 	}
 	e.SetPopulated()
+	e.Manager().Stash(e)
 	ret = e
+	return
+}
+
+// -- C A C H E -------------------------------------------------------------
+
+type EntityCache struct {
+	cache map[*Kind]map[int]Persistable
+}
+
+func MakeEntityCache() *EntityCache {
+	ret := &EntityCache{cache: make(map[*Kind]map[int]Persistable)}
+	return ret
+}
+
+func (cache *EntityCache) cacheForKey(e Persistable) (m map[int]Persistable) {
+	m, ok := cache.cache[e.Kind()]
+	if !ok {
+		m = make(map[int]Persistable)
+		cache.cache[e.Kind()] = m
+	}
+	return
+}
+
+func (cache *EntityCache) cacheForKind(k *Kind) (m map[int]Persistable) {
+	m, ok := cache.cache[k]
+	if !ok {
+		m = make(map[int]Persistable)
+		cache.cache[k] = m
+	}
+	return
+}
+
+func (cache *EntityCache) Put(e Persistable) {
+	m := cache.cacheForKey(e)
+	m[e.Id()] = e
+}
+
+func (cache *EntityCache) Get(k *Kind, id int) (e Persistable) {
+	m := cache.cacheForKind(k)
+	e = m[id]
+	return
+}
+
+func (cache *EntityCache) GetByKey(key *Key) (e Persistable) {
+	return cache.Get(key.Kind(), key.Id())
+}
+
+func (cache *EntityCache) Has(k *Kind, id int) (ok bool) {
+	m := cache.cacheForKind(k)
+	_, ok = m[id]
 	return
 }
 
@@ -173,11 +240,13 @@ func Populate(e Persistable, values map[string]interface{}) (ret Persistable, er
 
 type EntityManager struct {
 	*PostgreSQLAdapter
+	cache *EntityCache
 }
 
 func MakeEntityManager() (mgr *EntityManager, err error) {
 	mgr = new(EntityManager)
 	mgr.PostgreSQLAdapter = GetPostgreSQLAdapter()
+	mgr.cache = MakeEntityCache()
 	return
 }
 
@@ -194,10 +263,21 @@ func (mgr *EntityManager) New(kind *Kind, parent *Key) (entity Persistable, err 
 }
 
 func (mgr *EntityManager) Get(kind interface{}, id int) (ret Persistable, err error) {
+	k := GetKind(kind)
+	if k == nil {
+		err = errors.New(fmt.Sprintf("invalid entity kind %T", kind))
+		return
+	}
 	if id <= 0 {
 		err = errors.New("cannot Get() entity with ID less than or equal to zero")
 		return
 	}
+
+	if mgr.cache.Has(k, id) {
+		ret = mgr.cache.Get(k, id)
+		return
+	}
+
 	query := mgr.MakeQuery(kind)
 	query.AddCondition(HasId{Id: id})
 	query.AddReferenceJoins()
@@ -206,27 +286,31 @@ func (mgr *EntityManager) Get(kind interface{}, id int) (ret Persistable, err er
 	if err != nil {
 		return
 	}
-	m := reflect.ValueOf(e).MethodByName("GetQuery")
-	if m.IsValid() {
-		qv := m.Call([]reflect.Value{reflect.ValueOf(query)})
-		query = qv[0].Interface().(*Query)
+
+	qp, ok := e.(GetQueryProcessor)
+	if ok {
+		query = qp.GetQuery(query)
 	}
+
 	ret, err = query.ExecuteSingle(nil)
 	if err != nil {
 		return
 	}
+
 	if ret != nil {
-		m = reflect.ValueOf(ret).MethodByName("OnGet")
-		if m.IsValid() {
-			v := m.Call([]reflect.Value{})
-			if !v[1].IsNil() {
-				err = v[1].Interface().(error)
+		grp, ok := ret.(GetResultProcessor)
+		if ok {
+			ret, err = grp.OnGet()
+			if err != nil {
 				return
 			}
-			ret = v[0].Interface().(Persistable)
 		}
 	}
 	return
+}
+
+func (mgr *EntityManager) Stash(e Persistable) {
+	mgr.cache.Put(e)
 }
 
 func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persistable, err error) {
@@ -287,15 +371,31 @@ func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persist
 			}
 			query.AddCondition(&HasParent{Parent: parent.AsKey()})
 		}
+	} else if query.Kind.ParentKind != nil {
+		query.AddParentJoin(query.Kind.ParentKind)
 	}
 	query.AddReferenceJoins()
-	m := reflect.ValueOf(e).MethodByName("ManyQuery")
-	if m.IsValid() {
-		qv := m.Call([]reflect.Value{reflect.ValueOf(query), reflect.ValueOf(q)})
-		query = qv[0].Interface().(*Query)
+
+	qp, ok := e.(ManyQueryProcessor)
+	if ok {
+		query = qp.ManyQuery(query, q)
 	}
+
 	//log.Printf("%s\n", query.SQLText())
 	ret, err = query.Execute()
+	if err != nil {
+		return
+	}
+
+	qrp, ok := e.(QueryResultsProcessor)
+	if ok {
+		ret, err = qrp.ProcessQueryResults(ret)
+		if err != nil {
+			return
+		}
+	}
+
+	//log.Printf("%s\n", query.SQLText())
 	return
 }
 
@@ -387,13 +487,27 @@ func insert(e Persistable, conn *sql.DB) (err error) {
 	return
 }
 
+func (mgr *EntityManager) Adopt(e Persistable, children []Persistable) (err error) {
+	for _, child := range children {
+		child.Initialize(e, child.Id())
+		if err = child.Manager().Put(child); err != nil {
+			return
+		}
+	}
+	return
+}
+
 func (mgr *EntityManager) Put(e Persistable) (err error) {
 	SetKind(e)
 	return mgr.TX(func(db *sql.DB) error {
 		if e.Id() > 0 {
 			return update(e, db)
 		} else {
-			return insert(e, db)
+			var ret error
+			if ret = insert(e, db); ret == nil {
+				mgr.Stash(e)
+			}
+			return ret
 		}
 	})
 }
@@ -445,4 +559,8 @@ func (mgr *EntityManager) FindOrCreate(kind interface{}, parent *Key, field stri
 		}
 	}
 	return
+}
+
+func GetParent(e Persistable) (p Persistable, err error) {
+	return e.Manager().Get(e.Parent().Kind(), e.Parent().Ident)
 }

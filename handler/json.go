@@ -21,6 +21,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/JanDeVisser/grumble"
 	"io/ioutil"
@@ -51,34 +52,60 @@ func (req *JSONRequest) Execute() {
 }
 
 func Marshal(obj interface{}) (jsonText []byte, err error) {
-	var toJSON interface{}
-	switch v := obj.(type) {
-	case grumble.Persistable:
-		var marshalled map[string]interface{}
-		if marshalled, err = MarshalPersistableToMap(v); err != nil {
-			return
-		}
-		toJSON = marshalled
-	case [][]grumble.Persistable:
-		objs := make([][]map[string]interface{}, 0)
-		for _, row := range v {
-			r := make([]map[string]interface{}, 0)
-			for _, o := range row {
-				var marshalled map[string]interface{}
-				if marshalled, err = MarshalPersistableToMap(o); err != nil {
-					return
-				}
-				r = append(r, marshalled)
+	if toJSON, err := MarshalToMap(obj); err == nil {
+		return json.Marshal(toJSON)
+	} else {
+		return nil, err
+	}
+}
+
+func MarshalToMap(obj interface{}) (ret interface{}, err error) {
+	v := reflect.ValueOf(obj)
+	if !v.IsValid() {
+		return
+	}
+	t := v.Type()
+	k := v.Kind()
+	switch k {
+	//case reflect.Array,
+	//	slice = v.Slice(0, v.Len())
+	//	fallthrough
+	case reflect.Slice, reflect.Array:
+		objs := make([]interface{}, 0)
+		for i := 0; i < v.Len(); i++ {
+			o := v.Index(i).Interface()
+			var marshalled interface{}
+			if marshalled, err = MarshalToMap(o); err != nil {
+				return
 			}
-			objs = append(objs, r)
+			objs = append(objs, marshalled)
 		}
-		toJSON = objs
+		ret = objs
+	case reflect.Map:
+		if t.Key().Kind() != reflect.String {
+			return nil, errors.New("can only marshal maps with string keys")
+		}
+		m := obj.(map[string]interface{})
+		marshalled := make(map[string]interface{})
+		for key, val := range m {
+			marshalled[key], err = MarshalToMap(val)
+		}
+		ret = marshalled
 	default:
-		if toJSON, err = MarshalSimpleObjectToMap(v); err != nil {
-			return
+		switch v := obj.(type) {
+		case grumble.Persistable:
+			var marshalled map[string]interface{}
+			if marshalled, err = MarshalPersistableToMap(v); err != nil {
+				return
+			}
+			ret = marshalled
+		default:
+			if ret, err = MarshalSimpleObjectToMap(v); err != nil {
+				return
+			}
 		}
 	}
-	return json.Marshal(toJSON)
+	return
 }
 
 func MarshalPersistableToMap(obj grumble.Persistable) (jsonData map[string]interface{}, err error) {
@@ -95,18 +122,9 @@ func MarshalPersistableToMap(obj grumble.Persistable) (jsonData map[string]inter
 	}
 	jsonData["_kind"] = k.Basename()
 	for name, value := range obj.SyntheticFields() {
-		switch v := value.(type) {
-		case grumble.Persistable:
-			var marshalled map[string]interface{}
-			if marshalled, err = MarshalPersistableToMap(v); err != nil {
-				return
-			}
-			jsonData[name] = marshalled
-		default:
-			var marshalled interface{}
-			if marshalled, err = MarshalSimpleObjectToMap(v); err != nil {
-				return
-			}
+		if marshalled, err := MarshalToMap(value); err != nil {
+			return nil, err
+		} else if marshalled != nil {
 			jsonData[name] = marshalled
 		}
 	}
