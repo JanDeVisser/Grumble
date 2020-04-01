@@ -165,6 +165,7 @@ func (cond References) Values(values []interface{}) (ret []interface{}) {
 
 type CompoundCondition struct {
 	Conditions []Condition
+	Operand    string
 }
 
 func (compound *CompoundCondition) AddCondition(cond Condition) Condition {
@@ -180,7 +181,10 @@ func (compound CompoundCondition) WhereClause(query *Query, queryConstraint bool
 	for ix, c := range compound.Conditions {
 		conditions[ix] = "(" + c.WhereClause(query, queryConstraint) + ")"
 	}
-	return strings.Join(conditions, " AND ")
+	if compound.Operand == "" {
+		compound.Operand = "AND"
+	}
+	return strings.Join(conditions, fmt.Sprintf(" %s ", compound.Operand))
 }
 
 func (compound CompoundCondition) Values(values []interface{}) []interface{} {
