@@ -158,6 +158,7 @@ type Join struct {
 	QueryTable
 	Direction    JoinDirection
 	JoinType     JoinType
+	JoinWith     string
 	FieldName    string
 	Reference    bool
 	IsSuppressed bool
@@ -192,13 +193,16 @@ func (join Join) JoinClause() string {
 		}
 		column = fmt.Sprintf("%q", c.ColumnName)
 	}
+	if join.JoinWith == "" {
+		join.JoinWith = join.Query.Alias
+	}
 	if join.FieldName != "" {
 		var alias1, alias2 string
 		if join.Direction == Referring {
 			alias1 = join.Alias
-			alias2 = join.Query.Alias
+			alias2 = join.JoinWith
 		} else {
-			alias1 = join.Query.Alias
+			alias1 = join.JoinWith
 			alias2 = join.Alias
 		}
 		clause = fmt.Sprintf("%s JOIN %s ON ( (%s.\"_kind\", %s.\"_id\") = %s.%s)",
@@ -321,6 +325,27 @@ func (query *Query) AddParentJoin(kind interface{}) *Query {
 			WithDerived: true,
 		},
 		FieldName: "_parent",
+		JoinType:  Outer,
+		Direction: Out,
+		Reference: true,
+	}
+	return query.AddJoin(j)
+}
+
+func (query *Query) AddGrandParentJoin(kind interface{}) *Query {
+	k := GetKind(kind)
+	if k == nil {
+		return query
+	}
+	j := Join{
+		QueryTable: QueryTable{
+			Kind:        k,
+			Alias:       "grandparent",
+			GroupBy:     false,
+			WithDerived: true,
+		},
+		JoinWith:  "parent",
+		FieldName: "_grandparent",
 		JoinType:  Outer,
 		Direction: Out,
 		Reference: true,

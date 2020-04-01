@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"reflect"
 	"strconv"
@@ -43,17 +44,39 @@ type QueryResultsProcessor interface {
 	ProcessQueryResults(results [][]Persistable) (ret [][]Persistable, err error)
 }
 
+type PutInterceptor interface {
+	OnPut() (err error)
+	AfterPut() (err error)
+}
+
+type InsertInterceptor interface {
+	OnInsert() (err error)
+	AfterInsert() (err error)
+}
+
+type DeleteInterceptor interface {
+	OnDelete() (err error)
+}
+
+type LabelBuilder interface {
+	Label() string
+}
+
 // --------------------------------------------------------------------------
 
 func Label(e Persistable) string {
-	k := e.Kind()
-	if k.LabelCol == "" {
-		return e.AsKey().String()
+	if labelBuilder, ok := e.(LabelBuilder); ok {
+		return labelBuilder.Label()
 	} else {
-		if val, ok := Field(e, k.LabelCol); ok {
-			return fmt.Sprintf("%v", val)
-		} else {
+		k := e.Kind()
+		if k.LabelCol == "" {
 			return e.AsKey().String()
+		} else {
+			if val, ok := Field(e, k.LabelCol); ok {
+				return fmt.Sprintf("%v", val)
+			} else {
+				return e.AsKey().String()
+			}
 		}
 	}
 }
@@ -66,12 +89,23 @@ func Field(e Persistable, fieldName string) (ret interface{}, ok bool) {
 	v := reflect.ValueOf(e).Elem()
 	fld := v.FieldByIndex(col.Index)
 	if fld.IsValid() && fld.CanInterface() {
-		ret = fld.Interface()
+		if (fld.Kind() == reflect.Ptr || fld.Kind() == reflect.Interface) && fld.IsNil() {
+			ok = false
+		} else {
+			ret = fld.Interface()
+		}
+	} else {
+		ok = false
 	}
 	return
 }
 
 func SetField(e Persistable, fieldName string, value interface{}) (ok bool) {
+	// log.Printf("%s.%s %v %T", e.Kind().Basename(), fieldName, value, value)
+	valueVal := reflect.ValueOf(value)
+	if !valueVal.IsValid() {
+		return
+	}
 	col, ok := e.Kind().Column(fieldName)
 	if !ok {
 		return e.SetSyntheticField(fieldName, value)
@@ -226,6 +260,11 @@ func (cache *EntityCache) Get(k *Kind, id int) (e Persistable) {
 	return
 }
 
+func (cache *EntityCache) Del(e Persistable) {
+	m := cache.cacheForKey(e)
+	delete(m, e.Id())
+}
+
 func (cache *EntityCache) GetByKey(key *Key) (e Persistable) {
 	return cache.Get(key.Kind(), key.Id())
 }
@@ -313,11 +352,19 @@ func (mgr *EntityManager) Stash(e Persistable) {
 	mgr.cache.Put(e)
 }
 
+func (mgr *EntityManager) Unstash(e Persistable) {
+	mgr.cache.Del(e)
+}
+
 func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persistable, err error) {
 	query := mgr.MakeQuery(kind)
 	e, err := mgr.Make(query.Kind, nil, 0)
 	if err != nil {
 		return
+	}
+	op := "="
+	if q.Get("_re") != "" {
+		op = "~*"
 	}
 	for _, col := range query.Kind.Columns {
 		if q.Get(col.FieldName) != "" {
@@ -334,7 +381,11 @@ func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persist
 					References: k,
 				})
 			} else {
-				query.AddFilter(col.ColumnName, q.Get(col.FieldName))
+				query.AddCondition(Predicate{
+					Expression: fmt.Sprintf("__alias__.\"%s\"", col.ColumnName),
+					Operator:   op,
+					Value:      q.Get(col.FieldName),
+				})
 			}
 		}
 	}
@@ -381,7 +432,7 @@ func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persist
 		query = qp.ManyQuery(query, q)
 	}
 
-	//log.Printf("%s\n", query.SQLText())
+	log.Printf("%s\n", query.SQLText())
 	ret, err = query.Execute()
 	if err != nil {
 		return
@@ -487,6 +538,23 @@ func insert(e Persistable, conn *sql.DB) (err error) {
 	return
 }
 
+var deleteEntity = SQLTemplate{Name: "DeleteEntity", SQL: `DELETE FROM {{.QualifiedTableName}} WHERE _id = $1`}
+
+func del(e Persistable, conn *sql.DB) (err error) {
+	k := e.Kind()
+	var sqlText string
+	sqlText, err = deleteEntity.Process(k)
+	if err != nil {
+		return
+	}
+	values := make([]interface{}, 1)
+	values[0] = e.Id()
+	if _, err = conn.Exec(sqlText, values...); err != nil {
+		return
+	}
+	return
+}
+
 func (mgr *EntityManager) Adopt(e Persistable, children []Persistable) (err error) {
 	for _, child := range children {
 		child.Initialize(e, child.Id())
@@ -499,16 +567,57 @@ func (mgr *EntityManager) Adopt(e Persistable, children []Persistable) (err erro
 
 func (mgr *EntityManager) Put(e Persistable) (err error) {
 	SetKind(e)
-	return mgr.TX(func(db *sql.DB) error {
-		if e.Id() > 0 {
-			return update(e, db)
-		} else {
-			var ret error
-			if ret = insert(e, db); ret == nil {
-				mgr.Stash(e)
+	return mgr.TX(func(db *sql.DB) (err error) {
+		putInterceptor, ok := e.(PutInterceptor)
+		if ok {
+			if err = putInterceptor.OnPut(); err != nil {
+				return
 			}
-			return ret
 		}
+		if e.Id() > 0 {
+			if err = update(e, db); err != nil {
+				return
+			}
+		} else {
+			insertInterceptor, ok2 := e.(InsertInterceptor)
+			if ok2 {
+				if err = insertInterceptor.OnInsert(); err != nil {
+					return
+				}
+			}
+			if err = insert(e, db); err != nil {
+				return
+			}
+			if ok2 {
+				if err = insertInterceptor.AfterInsert(); err != nil {
+					return
+				}
+			}
+			mgr.Stash(e)
+		}
+		if ok {
+			if err = putInterceptor.AfterPut(); err != nil {
+				return
+			}
+		}
+		return
+	})
+}
+
+func (mgr *EntityManager) Delete(e Persistable) (err error) {
+	return mgr.TX(func(db *sql.DB) (err error) {
+		if e.Id() > 0 {
+			interceptor, ok := e.(DeleteInterceptor)
+			if ok {
+				if err = interceptor.OnDelete(); err != nil {
+					return
+				}
+			}
+			if err = del(e, db); err == nil {
+				mgr.Unstash(e)
+			}
+		}
+		return
 	})
 }
 

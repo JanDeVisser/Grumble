@@ -122,10 +122,23 @@ func MarshalPersistableToMap(obj grumble.Persistable) (jsonData map[string]inter
 	}
 	jsonData["_kind"] = k.Basename()
 	for name, value := range obj.SyntheticFields() {
-		if marshalled, err := MarshalToMap(value); err != nil {
+		if name != "_parent" {
+			if marshalled, err := MarshalToMap(value); err != nil {
+				return nil, err
+			} else if marshalled != nil {
+				jsonData[name] = marshalled
+			}
+		}
+	}
+	if k.ParentKind != nil {
+		p, err := obj.Manager().Get(obj.Parent().Kind(), obj.Parent().Id())
+		if err != nil {
 			return nil, err
-		} else if marshalled != nil {
-			jsonData[name] = marshalled
+		}
+		if marshalledParent, err := MarshalPersistableToMap(p); err != nil {
+			return nil, err
+		} else {
+			jsonData[k.ParentKind.Basename()] = marshalledParent
 		}
 	}
 	m := reflect.ValueOf(obj).MethodByName("Marshal")
@@ -178,6 +191,11 @@ func (req *JSONRequest) GET() {
 	} else {
 		log.Printf("JSON.GET q=%q", req.r.URL.Query().Encode())
 		var results [][]grumble.Persistable
+		if req.r.ParseForm() != nil {
+			log.Print(err)
+			http.Error(req.w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		results, err = req.mgr.Query(req.Kind, req.r.URL.Query())
 		if err == nil {
 			log.Printf("JSON.GET len(results): %d", len(results))
@@ -221,8 +239,8 @@ func JSON(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	case r.Form.Get("id") != "":
-		id, err = strconv.ParseInt(r.Form.Get("id"), 0, 0)
+	case r.FormValue("id") != "":
+		id, err = strconv.ParseInt(r.FormValue("id"), 0, 0)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
