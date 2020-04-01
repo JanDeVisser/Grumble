@@ -3,6 +3,7 @@ package grumble
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"reflect"
 	"strconv"
@@ -25,25 +26,30 @@ type Setter interface {
 	SetValue(Persistable, Column, interface{}) error
 }
 
+type BasicConverter struct {
+	sqlType string
+	GoType  reflect.Type
+}
+
 var ConvertersForKind = map[reflect.Kind]Converter{
-	reflect.Bool:    &BasicConverter{"boolean"},
-	reflect.Int:     &BasicConverter{"integer"},
-	reflect.Int8:    &BasicConverter{"integer"},
-	reflect.Int16:   &BasicConverter{"integer"},
-	reflect.Int32:   &BasicConverter{"integer"},
-	reflect.Int64:   &BasicConverter{"integer"},
-	reflect.Uint:    &BasicConverter{"integer"},
-	reflect.Uint8:   &BasicConverter{"integer"},
-	reflect.Uint16:  &BasicConverter{"integer"},
-	reflect.Uint32:  &BasicConverter{"integer"},
-	reflect.Uint64:  &BasicConverter{"integer"},
-	reflect.Float32: &BasicConverter{"double precision"},
-	reflect.Float64: &BasicConverter{"double precision"},
-	reflect.String:  &BasicConverter{"text"},
+	reflect.Bool:    &BasicConverter{"boolean", reflect.TypeOf(true)},
+	reflect.Int:     &BasicConverter{"integer", reflect.TypeOf(1)},
+	reflect.Int8:    &BasicConverter{"integer", reflect.TypeOf(int8(1))},
+	reflect.Int16:   &BasicConverter{"integer", reflect.TypeOf(int16(1))},
+	reflect.Int32:   &BasicConverter{"integer", reflect.TypeOf(int32(1))},
+	reflect.Int64:   &BasicConverter{"integer", reflect.TypeOf(int64(1))},
+	reflect.Uint:    &BasicConverter{"integer", reflect.TypeOf(uint(1))},
+	reflect.Uint8:   &BasicConverter{"integer", reflect.TypeOf(uint8(1))},
+	reflect.Uint16:  &BasicConverter{"integer", reflect.TypeOf(uint16(1))},
+	reflect.Uint32:  &BasicConverter{"integer", reflect.TypeOf(uint32(1))},
+	reflect.Uint64:  &BasicConverter{"integer", reflect.TypeOf(uint64(1))},
+	reflect.Float32: &BasicConverter{"double precision", reflect.TypeOf(float32(1.0))},
+	reflect.Float64: &BasicConverter{"double precision", reflect.TypeOf(float64(1.0))},
+	reflect.String:  &BasicConverter{"text", reflect.TypeOf("")},
 }
 
 var ConvertersForType = map[reflect.Type]Converter{
-	reflect.TypeOf(time.Time{}): &BasicConverter{"timestamp without time zone"},
+	reflect.TypeOf(time.Time{}): &BasicConverter{"timestamp without time zone", reflect.TypeOf(time.Time{})},
 }
 
 func GetConverterForType(t reflect.Type) (converter Converter) {
@@ -74,10 +80,6 @@ func (scanner *BasicScanner) Scan(value interface{}) (err error) {
 }
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-
-type BasicConverter struct {
-	sqlType string
-}
 
 func (converter *BasicConverter) SQLType(column Column) string {
 	return converter.sqlType
@@ -156,6 +158,16 @@ func (converter *BasicConverter) SetValue(e Persistable, column Column, value in
 					panic(fmt.Sprintf("can't convert %q to bool", vv))
 				} else {
 					fld.Set(reflect.ValueOf(b))
+				}
+			case reflect.Struct:
+				if converter.GoType == reflect.TypeOf(time.Time{}) {
+					if t, err := time.Parse("2006-01-02", vv); err != nil {
+						panic(fmt.Sprintf("can't convert %q to Time", vv))
+					} else {
+						fld.Set(reflect.ValueOf(t))
+					}
+				} else {
+					log.Println(column.ColumnName, vv)
 				}
 			default:
 				panic(fmt.Sprintf("cannot convert strings to objects of kind %q", fld.Kind()))
