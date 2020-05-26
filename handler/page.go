@@ -59,6 +59,7 @@ type About struct {
 type AppConfig struct {
 	Mounts         []Mount
 	Pipeline       []PipelineEntry
+	Config         map[string]interface{}
 	Icon           string
 	Author         string
 	Version        string
@@ -574,6 +575,10 @@ func AddStatic(pattern string, h string) {
 	}
 	config.Mounts = append(config.Mounts, m)
 	m.Install()
+}
+
+func GetAppConfig() map[string]interface{} {
+	return config.Config
 }
 
 func StartApp(sync bool) {
