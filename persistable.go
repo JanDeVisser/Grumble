@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"reflect"
 	"strconv"
@@ -448,7 +447,7 @@ func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persist
 		query = qp.ManyQuery(query, q)
 	}
 
-	log.Printf("%s\n", query.SQLText())
+	//log.Printf("%s\n", query.SQLText())
 	ret, err = query.Execute()
 	if err != nil {
 		return
