@@ -147,9 +147,14 @@ func (tmpl SQLTemplate) Exec(conn *sql.DB, data interface{}, values ...interface
 func init() {
 	var err error
 
+	conf := "conf/database.conf"
+	if _, err = os.Open("../local.file"); err == nil {
+		conf = "conf/database.local.conf"
+	}
+
 	adapter = &defaultAdapter
 	var jsonText []byte
-	if jsonText, err = ioutil.ReadFile("conf/database.conf"); err == nil {
+	if jsonText, err = ioutil.ReadFile(conf); err == nil {
 		adapter = new(PostgreSQLAdapter)
 		err = json.Unmarshal(jsonText, adapter)
 		if err != nil {
