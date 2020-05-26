@@ -467,6 +467,10 @@ func (k *Kind) Reconcile(pg *PostgreSQLAdapter) (err error) {
 	return
 }
 
+func (k *Kind) Truncate(pg *PostgreSQLAdapter) error {
+	return k.SQLTable(pg).Truncate()
+}
+
 func (k *Kind) MakeValue(parent *Key, id int) (value reflect.Value, entity Persistable, err error) {
 	value = reflect.New(k.Type())
 	entity, ok := value.Interface().(Persistable)

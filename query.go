@@ -105,7 +105,7 @@ func (table *QueryTable) AddFilter(field string, value interface{}) *QueryTable 
 	if !ok {
 		return table
 	}
-	table.AddCondition(Predicate{
+	table.AddCondition(&Predicate{
 		Expression: fmt.Sprintf("__alias__.\"%s\"", column.ColumnName),
 		Operator:   "=",
 		Value:      value,
@@ -120,7 +120,7 @@ func (table *QueryTable) HasParent(parent Persistable) *QueryTable {
 	} else {
 		pk = ZeroKey
 	}
-	table.AddCondition(HasParent{Parent: pk})
+	table.AddCondition(&HasParent{Parent: pk})
 	return table
 }
 

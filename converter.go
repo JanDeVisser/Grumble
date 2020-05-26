@@ -34,10 +34,10 @@ type BasicConverter struct {
 var ConvertersForKind = map[reflect.Kind]Converter{
 	reflect.Bool:    &BasicConverter{"boolean", reflect.TypeOf(true)},
 	reflect.Int:     &BasicConverter{"integer", reflect.TypeOf(1)},
-	reflect.Int8:    &BasicConverter{"integer", reflect.TypeOf(int8(1))},
-	reflect.Int16:   &BasicConverter{"integer", reflect.TypeOf(int16(1))},
+	reflect.Int8:    &BasicConverter{"smallint", reflect.TypeOf(int8(1))},
+	reflect.Int16:   &BasicConverter{"smallint", reflect.TypeOf(int16(1))},
 	reflect.Int32:   &BasicConverter{"integer", reflect.TypeOf(int32(1))},
-	reflect.Int64:   &BasicConverter{"integer", reflect.TypeOf(int64(1))},
+	reflect.Int64:   &BasicConverter{"bigint", reflect.TypeOf(int64(1))},
 	reflect.Uint:    &BasicConverter{"integer", reflect.TypeOf(uint(1))},
 	reflect.Uint8:   &BasicConverter{"integer", reflect.TypeOf(uint8(1))},
 	reflect.Uint16:  &BasicConverter{"integer", reflect.TypeOf(uint16(1))},

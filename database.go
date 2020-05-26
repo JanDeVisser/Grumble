@@ -19,6 +19,7 @@ import (
 
 type PostgreSQLAdapter struct {
 	Hostname      string
+	Port          int
 	Username      string
 	Password      string
 	AdminUser     string
@@ -36,6 +37,7 @@ type PostgreSQLAdapter struct {
 
 var defaultAdapter = PostgreSQLAdapter{
 	Hostname:      "localhost",
+	Port:          5432,
 	Username:      "grumble",
 	AdminUser:     "postgres",
 	Password:      "secret",
@@ -190,8 +192,8 @@ func (pg *PostgreSQLAdapter) getConnection(admin bool) *sql.DB {
 		user = pg.Username
 		pwd = pg.Password
 	}
-	connStr := fmt.Sprintf("user=%s password=%s dbname=%s host=%s sslmode=disable",
-		user, pwd, pg.DatabaseName, pg.Hostname)
+	connStr := fmt.Sprintf("user=%s password=%s dbname=%s host=%s port=%d sslmode=disable",
+		user, pwd, pg.DatabaseName, pg.Hostname, pg.Port)
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
@@ -941,6 +943,14 @@ func (table SQLTable) Reconcile() (err error) {
 func (table SQLTable) Drop() (err error) {
 	return table.pg.TX(func(db *sql.DB) (err error) {
 		s := fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", table.QualifiedName())
+		_, err = table.pg.GetConnection().Exec(s)
+		return
+	})
+}
+
+func (table SQLTable) Truncate() (err error) {
+	return table.pg.TX(func(db *sql.DB) (err error) {
+		s := fmt.Sprintf("TRUNCATE TABLE %s CASCADE", table.QualifiedName())
 		_, err = table.pg.GetConnection().Exec(s)
 		return
 	})

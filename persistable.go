@@ -44,6 +44,10 @@ type QueryResultsProcessor interface {
 	ProcessQueryResults(results [][]Persistable) (ret [][]Persistable, err error)
 }
 
+type CreateInterceptor interface {
+	AfterCreate() (err error)
+}
+
 type PutInterceptor interface {
 	OnPut() (err error)
 	AfterPut() (err error)
@@ -214,6 +218,13 @@ func Populate(e Persistable, values map[string]interface{}) (ret Persistable, er
 			}
 		}
 	}
+	grp, ok := e.(GetResultProcessor)
+	if ok {
+		ret, err = grp.OnGet()
+		if err != nil {
+			return
+		}
+	}
 	e.SetPopulated()
 	e.Manager().Stash(e)
 	ret = e
@@ -289,15 +300,29 @@ func MakeEntityManager() (mgr *EntityManager, err error) {
 	return
 }
 
-func (mgr *EntityManager) Make(kind *Kind, parent *Key, id int) (entity Persistable, err error) {
-	entity, err = kind.Make(parent, id)
+func (mgr *EntityManager) Make(kind interface{}, parent *Key, id int) (entity Persistable, err error) {
+	k := GetKind(kind)
+	if k == nil {
+		err = errors.New(fmt.Sprintf("cannot determine kind of object %v", kind))
+		return
+	}
+	if parent == nil {
+		parent = ZeroKey
+	}
+	entity, err = k.Make(parent, id)
 	if entity != nil {
 		entity.SetManager(mgr)
+	}
+	interceptor, ok := entity.(CreateInterceptor)
+	if ok {
+		if err = interceptor.AfterCreate(); err != nil {
+			return
+		}
 	}
 	return
 }
 
-func (mgr *EntityManager) New(kind *Kind, parent *Key) (entity Persistable, err error) {
+func (mgr *EntityManager) New(kind interface{}, parent *Key) (entity Persistable, err error) {
 	return mgr.Make(kind, parent, 0)
 }
 
@@ -318,7 +343,7 @@ func (mgr *EntityManager) Get(kind interface{}, id int) (ret Persistable, err er
 	}
 
 	query := mgr.MakeQuery(kind)
-	query.AddCondition(HasId{Id: id})
+	query.AddCondition(&HasId{Id: id})
 	query.AddReferenceJoins()
 
 	e, err := mgr.Make(query.Kind, nil, id)
@@ -336,15 +361,6 @@ func (mgr *EntityManager) Get(kind interface{}, id int) (ret Persistable, err er
 		return
 	}
 
-	if ret != nil {
-		grp, ok := ret.(GetResultProcessor)
-		if ok {
-			ret, err = grp.OnGet()
-			if err != nil {
-				return
-			}
-		}
-	}
 	return
 }
 
@@ -376,12 +392,12 @@ func (mgr *EntityManager) Query(kind interface{}, q url.Values) (ret [][]Persist
 					return
 				}
 				k, _ := CreateKey(nil, GetKind(refConv.References), int(id))
-				query.AddCondition(References{
+				query.AddCondition(&References{
 					Column:     col.FieldName,
 					References: k,
 				})
 			} else {
-				query.AddCondition(Predicate{
+				query.AddCondition(&Predicate{
 					Expression: fmt.Sprintf("__alias__.\"%s\"", col.ColumnName),
 					Operator:   op,
 					Value:      q.Get(col.FieldName),
@@ -637,20 +653,34 @@ func (mgr *EntityManager) By(kind interface{}, columnName string, value interfac
 	return mgr.ByColumnAndParent(kind, nil, columnName, value)
 }
 
-func (mgr *EntityManager) ByColumnAndParent(kind interface{}, parent *Key, columnName string, value interface{}) (entity Persistable, err error) {
+func (mgr *EntityManager) ByColumnsAndParent(kind interface{}, parent *Key, columns map[string]interface{}) (entity Persistable, err error) {
 	q := mgr.MakeQuery(kind)
 	if parent != nil {
-		q.AddCondition(HasParent{Parent: parent})
+		q.AddCondition(&HasParent{Parent: parent})
 	}
-	q.AddFilter(columnName, value)
+	for col, val := range columns {
+		q.AddFilter(col, val)
+	}
 	return q.ExecuteSingle(nil)
 }
 
+func (mgr *EntityManager) ByColumnAndParent(kind interface{}, parent *Key, columnName string, value interface{}) (entity Persistable, err error) {
+	cols := make(map[string]interface{}, 1)
+	cols[columnName] = value
+	return mgr.ByColumnsAndParent(kind, parent, cols)
+}
+
 func (mgr *EntityManager) FindOrCreate(kind interface{}, parent *Key, field string, value string) (e Persistable, err error) {
+	cols := make(map[string]interface{}, 1)
+	cols[field] = value
+	return mgr.FindOrCreateColumns(kind, parent, cols)
+}
+
+func (mgr *EntityManager) FindOrCreateColumns(kind interface{}, parent *Key, columns map[string]interface{}) (e Persistable, err error) {
 	k := GetKind(kind)
-	e, err = mgr.ByColumnAndParent(k, parent, field, value)
+	e, err = mgr.ByColumnsAndParent(k, parent, columns)
 	if err != nil {
-		err = errors.New(fmt.Sprintf("ByColumnAndParent(%q, %q = %q): %s", parent.String(), field, value, err))
+		err = errors.New(fmt.Sprintf("FindOrCreateColumns(%q, %v): %s", parent.String(), columns, err))
 		return
 	}
 	if e == nil {
@@ -658,9 +688,11 @@ func (mgr *EntityManager) FindOrCreate(kind interface{}, parent *Key, field stri
 		if err != nil {
 			return nil, err
 		}
-		if !SetField(e, field, value) {
-			err = errors.New(fmt.Sprintf("could not set field %q on entity of kind %q", field, k.Kind))
-			return nil, err
+		for col, val := range columns {
+			if !SetField(e, col, val) {
+				err = errors.New(fmt.Sprintf("could not set field %q on entity of kind %q", col, k.Kind))
+				return nil, err
+			}
 		}
 		err = mgr.Put(e)
 		if err != nil {
