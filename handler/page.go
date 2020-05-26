@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -59,6 +60,7 @@ type About struct {
 type AppConfig struct {
 	Mounts         []Mount
 	Pipeline       []PipelineEntry
+	Port           int
 	Config         map[string]interface{}
 	Icon           string
 	Author         string
@@ -610,7 +612,17 @@ func StartApp(sync bool) {
 	}
 	start := func() {
 		log.Println("Starting Listener")
-		log.Fatal(http.ListenAndServe(":8080", nil))
+		port := config.Port
+		if port <= 0 {
+			if portEnv := os.Getenv("PORT"); portEnv != "" {
+				if port64, err := strconv.ParseInt(portEnv, 10, 16); err == nil {
+					port = int(port64)
+				}
+			} else {
+				port = 8080
+			}
+		}
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 	}
 	if sync {
 		start()
