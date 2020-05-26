@@ -192,8 +192,12 @@ func (pg *PostgreSQLAdapter) getConnection(admin bool) *sql.DB {
 		user = pg.Username
 		pwd = pg.Password
 	}
-	connStr := fmt.Sprintf("user=%s password=%s dbname=%s host=%s port=%d sslmode=disable",
-		user, pwd, pg.DatabaseName, pg.Hostname, pg.Port)
+	portStr := ""
+	if pg.Port > 0 {
+		portStr = fmt.Sprintf("port=%d", pg.Port)
+	}
+	connStr := fmt.Sprintf("user=%s password=%s dbname=%s host=%s %s sslmode=disable",
+		user, pwd, pg.DatabaseName, pg.Hostname, portStr)
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
