@@ -82,7 +82,8 @@ func (cond *HasMaxValue) WhereClause(query *Query, queryConstraint bool) string 
 	if queryConstraint {
 		alias = query.Alias + "."
 	}
-	return fmt.Sprintf("%s%q = (SELECT MAX(%q) FROM %s)", alias, cond.Column, cond.Column, query.Kind.QualifiedTableName())
+	return fmt.Sprintf("%s%q = (SELECT MAX(%q) FROM %s %s)",
+		alias, cond.Column, cond.Column, query.Kind.QualifiedTableName(), query.SelectWhereClause(false))
 }
 
 func (cond *HasMaxValue) Values(values []interface{}) []interface{} {
