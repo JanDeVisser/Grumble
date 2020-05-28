@@ -59,6 +59,8 @@ type QueryTable struct {
 	GroupBy     bool
 	Computed    []Computed
 	Aggregates  []Aggregate
+	Offset      int
+	Limit       int
 	Query       *Query
 }
 
@@ -130,6 +132,17 @@ func (table *QueryTable) WhereClause(queryConstraint bool) string {
 	} else {
 		return ""
 	}
+}
+
+func (table *QueryTable) OffsetAndLimit() (ret string) {
+	ret = ""
+	if table.Limit > 0 {
+		ret = fmt.Sprintf("LIMIT %d", table.Limit)
+	}
+	if table.Offset > 0 {
+		ret = fmt.Sprintf("%s OFFSET %d", ret, table.Offset)
+	}
+	return
 }
 
 // --------------------------------------------------------------------------
@@ -515,7 +528,8 @@ SELECT
 	GROUP BY {{$JoinAlias}}."_kind", {{$JoinAlias}}."_parent",{{$JoinAlias}}."_id"{{range .Kind.Columns}}, 
 			 {{.Converter.SQLTextIn . $JoinAlias false}}{{end}}
 	{{end}}
-	ORDER BY{{range .Sorting}} {{.SQLText}},{{end}} {{$.Alias}}."_id" ASC 
+	ORDER BY{{range .Sorting}} {{.SQLText}},{{end}} {{$.Alias}}."_id" ASC
+	{{.OffsetAndLimit}}
 `}
 
 func (query *Query) SQLText() (s string) {
