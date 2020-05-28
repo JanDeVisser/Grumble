@@ -291,6 +291,7 @@ func (req *EntityRequest) GET() {
 				m := reflect.ValueOf(e).MethodByName("MakeListContext")
 				if m.IsValid() {
 					data := make(map[string]interface{}, 1)
+					data["Parameters"] = req.Values
 					data["results"] = results
 					rv := m.Call([]reflect.Value{reflect.ValueOf(req), reflect.ValueOf(data)})
 					if !rv[0].IsNil() {
