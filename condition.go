@@ -211,7 +211,7 @@ func (cond *References) where(schema string, alias string) string {
 	case !cond.hasZero && !cond.Invert:
 		return fmt.Sprintf("%s%q IN ( %s )", alias, cond.Column, params)
 	case !cond.hasZero && cond.Invert:
-		return fmt.Sprintf("(%s%q NOT IN ( %s ) OR %s%q IS NULL)", alias, cond.Column, params)
+		return fmt.Sprintf("(%s%q NOT IN ( %s ) OR %s%q IS NULL)", alias, cond.Column, params, alias, cond.Column)
 	case cond.hasZero && !cond.Invert:
 		return fmt.Sprintf("(%s%q IN ( %s ) OR %s%q IS NULL)",
 			alias, cond.Column, params, alias, cond.Column)
