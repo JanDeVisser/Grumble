@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lib/pq"
-	_ "github.com/lib/pq"
 	"io/ioutil"
 	"log"
 	"os"
@@ -15,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+
+	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 )
 
 type PostgreSQLAdapter struct {
@@ -147,9 +148,9 @@ func (tmpl SQLTemplate) Exec(conn *sql.DB, data interface{}, values ...interface
 func init() {
 	var err error
 
-	conf := "conf/database.conf"
-	if _, err = os.Open("../local.file"); err == nil {
-		conf = "conf/database.local.conf"
+	conf := os.Getenv("GRUMBLE_DBCONF")
+	if conf == "" {
+		conf = "conf/database.conf"
 	}
 
 	adapter = &defaultAdapter
