@@ -1,0 +1,15 @@
+{
+	"Hostname": "localhost",
+	"Port": 5432
+	"Username": "pg_user",
+	"AdminUser": "pg_adminuser",
+	"Password": "password",
+	"AdminPassword": "password",
+	"DatabaseName": "dbname",
+	"Schema": "grumble",
+	"WipeDatabase": false,
+	"WipeSchema": false,
+	"DatabaseInit": "",
+	"SchemaInit": "conf/grumble.sql",
+	"Reconcile": true
+}
