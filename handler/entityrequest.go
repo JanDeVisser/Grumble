@@ -292,6 +292,9 @@ func (req *EntityRequest) GET() {
 				if m.IsValid() {
 					data := make(map[string]interface{}, 1)
 					data["Parameters"] = req.Values
+					data["URL"] = req.r.URL.Path
+					data["Kind"] = req.Kind
+
 					data["results"] = results
 					rv := m.Call([]reflect.Value{reflect.ValueOf(req), reflect.ValueOf(data)})
 					if !rv[0].IsNil() {
